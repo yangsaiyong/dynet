@@ -156,17 +156,19 @@ EIGEN_STRONG_INLINE void logsumexp(const MyDevice & dev, const Tensor& x, Tensor
   } else {
     Eigen::array<int, 1> red_axis; red_axis[0] = 0;
     m.tb<0>().device(*dev.edevice) = x.tb<1>().maximum(red_axis);
-    // TODO: We want to do this in a single command, but this is causing incorrect results.
-    //  Eigen::array<int, 2> bcast({(int)x.d.rows(), 1});
-    //  z.tb<0>().device(*dev.edevice) = (x.tb<1>() - m.tb<1>().broadcast(bcast)).exp().sum();
-    //  z.tb<0>().device(*dev.edevice) = z.tb<0>().log() + m.tb<0>();
-    // Do the following instead
+    // TODO: Currently, the first version is slower on CPU, hence the switch
+#ifdef __CUDACC__
+    Eigen::array<int, 2> bcast({(int)x.d.rows(), 1});
+    // This needs to be split into two lines to prevent memory allocation
+    z.tb<0>().device(*dev.edevice) = (x.tb<1>() - m.tb<1>().broadcast(bcast)).exp().sum(red_axis);
+    z.tb<0>().device(*dev.edevice) = z.tb<0>().log() + m.tb<0>();
+#else
     vector<float> mvals = as_vector(m);
     for(size_t b = 0; b < x.d.bd; b++) {
-      // This needs to be split into two lines to prevent memory allocation
       z.tb<0>().chip<0>(b).device(*dev.edevice) = (x.tb<1>().chip<1>(b) - mvals[b]).exp().sum();
       z.tb<0>().chip<0>(b).device(*dev.edevice) = z.tb<0>().chip<0>(b).log() + mvals[b];
     }
+#endif
   }
 }
 
@@ -1933,11 +1935,11 @@ template<class MyDevice>
 void SumBatches::forward_dev_impl(const MyDevice & dev, const vector<const Tensor*>& xs, Tensor& fx) const {
   assert(xs.size() == 1);
   unsigned num_args = xs[0]->d.bd;
-#if __CUDACC__
-  TensorTools::Zero(fx);
-  for (unsigned i = 0; i < num_args; ++i)
-    CUBLAS_CHECK(cublasSaxpy(dev.cublas_handle, fx.d.size(), kSCALAR_ONE, xs[0]->v + i * xs[0]->d.batch_size(), 1, fx.v, 1));
+#ifdef __CUDACC__
+  Eigen::array<int, 1> red_axis; red_axis[0] = 2;
+  fx.t<2>().device(*dev.edevice) = xs[0]->tb<2>().sum(red_axis);
 #else
+  // TODO: Is this CPU version really good? Overhead can probably be reduced.
   auto res = *fx;
   const unsigned remainder = num_args % 4;
   switch (remainder) {
@@ -1960,8 +1962,8 @@ void SumBatches::backward_dev_impl(const MyDevice & dev,
                              Tensor& dEdxi) const {
   assert(i == 0);
 #if __CUDACC__
-  for (unsigned i = 0; i < dEdxi.d.bd; ++i)
-    CUBLAS_CHECK(cublasSaxpy(dev.cublas_handle, fx.d.size(), kSCALAR_ONE, dEdf.v, 1, dEdxi.v + i * dEdxi.d.batch_size(), 1));
+  Eigen::array<int, 3> bcast({1, 1, (int)fx.d.bd});
+  dEdxi.tb<2>().device(*dev.edevice) += dEdf.tb<2>().broadcast(bcast);
 #else
   for (unsigned i = 0; i < dEdxi.d.bd; ++i)
     dEdxi.batch_matrix(i) += *dEdf;
