@@ -12,6 +12,7 @@ extern std::mt19937* rndeng;
 extern std::vector<Device*> devices;
 extern Device* default_device;
 
+
 } // namespace dynet
 
 #endif

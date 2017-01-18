@@ -277,6 +277,7 @@ void ComputationGraph::set_dim_for_new_node(const VariableIndex& i) {
     ++ai;
   }
   node->dim = node->dim_forward(xds);
+  node->set_slowness(xds);
 }
 
 const Tensor& ComputationGraph::incremental_forward(const expr::Expression& last) { return ee->incremental_forward(last.i); }

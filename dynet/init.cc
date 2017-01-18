@@ -72,6 +72,17 @@ DynetParams extract_dynet_params(int& argc, char**& argv, bool shared_parameters
       }
     }
 
+    else if (arg == "--dynet-ncpu" || arg == "--dynet_ncpu") {
+      if ((argi + 1) > argc) {
+        cerr << "[dynet] --dynet-ncpu expects an argument (the number of threads)\n";
+        abort();
+      } else {
+        string a2 = argv[argi + 1];
+        istringstream c(a2); c >> params.ncpu;
+        remove_args(argc, argv, argi, 2);
+      }
+    }
+
 #if HAVE_CUDA
     // Number of GPUs
     else if (arg == "--dynet_gpus" || arg == "--dynet-gpus") {
@@ -169,6 +180,9 @@ void initialize(DynetParams params) {
     abort();
   }
   weight_decay_lambda = params.weight_decay;
+
+  // Set ncpus
+  ncpu = params.ncpu;
 
   // Allocate memory
   cerr << "[dynet] allocating memory: " << params.mem_descriptor << "MB\n";

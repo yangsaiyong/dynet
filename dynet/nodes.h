@@ -304,8 +304,17 @@ struct MaxPooling1D : public Node {
 
 // y = x_1 * x_2
 struct MatrixMultiply : public Node {
-  explicit MatrixMultiply(const std::initializer_list<VariableIndex>& a) : Node(a) {}
+  explicit MatrixMultiply(const std::initializer_list<VariableIndex>& a) : Node(a), _slow(false) { }
   virtual bool supports_multibatch() const override { return true; }
+  virtual bool slow() const override { return _slow; }
+  virtual void set_slowness(const std::vector<Dim> &xs) override { 
+      assert(xs.size() == 2);
+      const int T = 100*100; // TODO tune this value? or the fomula in general.
+      for (auto x : xs) {
+         if (x.size() > T) { _slow = true; return; }
+      }
+  }
+  bool _slow; // = false;
   DYNET_NODE_DEFINE_DEV_IMPL()
 };
 
@@ -325,8 +334,16 @@ struct CwiseQuotient : public Node {
 
 // y = x_1 \sum_{i=2, 4 ...} A_i * x_{i+1}
 struct AffineTransform : public Node {
-  template <typename T> explicit AffineTransform(const T& a) : Node(a) {}
+  template <typename T> explicit AffineTransform(const T& a) : Node(a), _slow(false) {}
   virtual bool supports_multibatch() const override { return true; }
+  virtual bool slow() const override { return _slow; }
+  virtual void set_slowness(const std::vector<Dim> &xs) override { 
+      const int T = 100*100; // TODO tune this value? or the fomula in general.
+      for (auto x : xs) {
+          if (x.size() > T) { _slow = true; return; }
+      }
+  }
+  bool _slow; // = false;
   DYNET_NODE_DEFINE_DEV_IMPL()
   mutable float* dEdf_mem;
 };
@@ -473,6 +490,7 @@ struct PickNegLogSoftmax : public Node {
   explicit PickNegLogSoftmax(const std::initializer_list<VariableIndex>& a, const std::vector<unsigned>* pv) : Node(a), val(), pval(), vals(), pvals(pv) {}
   DYNET_NODE_DEFINE_DEV_IMPL()
   virtual bool supports_multibatch() const override { return true; }
+  virtual bool slow() const override { return true; }
   size_t aux_storage_size() const override;
   unsigned val;
   const unsigned* pval;

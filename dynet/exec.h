@@ -2,6 +2,7 @@
 #define DYNET_EXEC_H
 
 #include "dynet/dynet.h"
+#include "dynet/ctpl_stl.h"
 
 namespace dynet {
 
@@ -24,7 +25,7 @@ class ExecutionEngine {
 
 class SimpleExecutionEngine : public ExecutionEngine {
  public:
-  explicit SimpleExecutionEngine(const ComputationGraph& cg) : ExecutionEngine(cg) {}
+  explicit SimpleExecutionEngine(const ComputationGraph& cg) : ExecutionEngine(cg), pool(ncpu) {}
   void invalidate() override;
   void invalidate(unsigned i) override;
   const Tensor& forward() override;
@@ -38,6 +39,7 @@ class SimpleExecutionEngine : public ExecutionEngine {
   std::vector<Tensor> nfxs;
   std::vector<Tensor> ndEdfs;
   VariableIndex num_nodes_evaluated;
+  ctpl::thread_pool pool;
 };
 
 } // namespace dynet

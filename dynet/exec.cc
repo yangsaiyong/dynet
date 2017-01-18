@@ -2,6 +2,9 @@
 
 #include "dynet/param-nodes.h"
 #include "dynet/globals.h"
+#include <thread>
+#include <chrono>
+#include "dynet/countdownlatch.h"
 
 using namespace std;
 
@@ -40,27 +43,94 @@ const Tensor& SimpleExecutionEngine::incremental_forward() {
   return incremental_forward(node_max_index);
 }
 
-const Tensor& SimpleExecutionEngine::incremental_forward(VariableIndex i) {
-  assert(i < cg.nodes.size());
+
+// this can run in a different thread, given that the memory is initialized.
+void do_node(int id, VariableIndex node_id, const Node *node, std::vector<Tensor> *nfxs,
+        clatch::countdownlatch *cl) {
+    vector<const Tensor*> xs(16);
+    xs.resize(node->arity());
+    unsigned ai = 0;
+    for (VariableIndex arg : node->args) {
+        xs[ai] = &(*nfxs)[arg];
+        ++ai;
+    }
+    if (node->slow()) {
+        //auto start = std::chrono::system_clock::now(); 
+        node->forward(xs, (*nfxs)[node_id]);
+        //auto end = std::chrono::system_clock::now(); 
+        //std::chrono::duration<float> elapsed_seconds = end-start;
+        //cout << elapsed_seconds.count() << endl;
+    } else {
+        node->forward(xs, (*nfxs)[node_id]);
+    }
+    if (cl) {
+        cl->count_down();
+    }
+}
+
+const Tensor& SimpleExecutionEngine::incremental_forward(VariableIndex upto) {
+  assert(upto < cg.nodes.size());
+  int already_evaluated = num_nodes_evaluated;
+
+  // depth of a node is max depth of its daughtets, +1.
+  // TODO consider tracking depths on the nodes as graph is created? or at least incrementally?
+  vector<int> depths(upto+1);
+  vector<vector<int> > parents(upto+1);
+  int max_depth=0;
+  for (int j=0; j<upto+1; ++j) { depths[j] = 0; } // how do I initialize to zeros?
+  for (int j=0; j<upto+1; ++j) {
+      const Node* node = cg.nodes[j];
+      for (VariableIndex arg : node->args) {
+          parents[arg].push_back(j); // track parents
+          if (depths[arg]+1 > depths[j]) {
+              depths[j] = depths[arg]+1;
+              if (depths[j] > max_depth) { max_depth = depths[j]; }
+          }
+      }
+  }
+  // by now, depthsj[j] is the earliest time that j can be evaluated (afer all its depends on).
+  // compute depths2[j], which is the latest tiem that j can be evaluated (just before the 
+  // earliest who depend on it).
+  vector<int> depths2(upto+1);
+  depths2[upto] = max_depth + 1;
+  for (int j=upto; j>=0;--j) {
+      int min_of_parents = max_depth + 1; // to be on the safe side
+      for (auto parent : parents[j]) {
+          if (depths2[parent] < min_of_parents) { min_of_parents = depths2[parent]; }
+      }
+      depths2[j] = min_of_parents - 1;
+      //assert(depths2[j] >= depths[j]);
+      //assert(depths2[j] <= max_depth);
+  }
+
+  // group by depth, using depth2.
+  // TODO: can we put some things earlier than depths2[j] but later than depths[j],
+  //       to maximize the number of "slow ops" that happen in parallel?
+  vector< vector<int> > by_depth(max_depth+2);
+  for (int j=0; j<depths2.size(); ++j) {
+      by_depth[depths2[j]].push_back(j);
+  }
+  //for (int j=0; j<by_depth.size(); ++j) {
+  //    cout << "depths " << j << " -> " << by_depth[j].size() << endl;;
+  //for (int nid : by_depth[j]) {
+  //        cout <<  " " << nid << "(" << cg.nodes[nid]->dim << ")";
+  //    }
+  //  cout << endl;
+  //}
+      
 
   // free any old memory if this is a new CG
   if (num_nodes_evaluated == 0)
     for(Device* dev : dynet::devices)
       dev->pools[(int)DeviceMempool::FXS]->free();
 
-  if (i >= num_nodes_evaluated) {
-    nfxs.resize(i + 1);
+  if (upto >= num_nodes_evaluated) {
+    nfxs.resize(upto + 1);
 
-    //vector<string> dummy(5, "x");
-    vector<const Tensor*> xs(16);
-    for (; num_nodes_evaluated <= i; ++num_nodes_evaluated) {
+    unsigned start_node = num_nodes_evaluated;
+    // memory allocation and preparation.
+    for (; num_nodes_evaluated <= upto; ++num_nodes_evaluated) {
       const Node* node = cg.nodes[num_nodes_evaluated];
-      xs.resize(node->arity());
-      unsigned ai = 0;
-      for (VariableIndex arg : node->args) {
-        xs[ai] = &nfxs[arg];
-        ++ai;
-      }
       nfxs[num_nodes_evaluated].d = node->dim;
       // Get the device
       assert(node->device != nullptr);
@@ -78,11 +148,57 @@ const Tensor& SimpleExecutionEngine::incremental_forward(VariableIndex i) {
       }
       node->aux_mem = aux_mem;
 
-      node->forward(xs, nfxs[num_nodes_evaluated]);
+    }
+    for (int d=0; d<by_depth.size(); ++d) {
+        vector<int> slow_ops;
+        int first_slow_op = -1;
+        for (int nid : by_depth[d]) {
+            if (nid < already_evaluated) continue;
+            if (cg.nodes[nid]->slow()) slow_ops.push_back(nid); //slows++;
+        }
+        if (slow_ops.size() > 0) {
+           first_slow_op = slow_ops.back();
+           slow_ops.pop_back();
+        }
+        int n_thread_ops = slow_ops.size();
+        //if (slows < 2) slows = 0;
+        //cout << slow_ops.size() << "/" << by_depth[d].size() << endl;
+        if (ncpu <= 1) n_thread_ops = 0;
+        //slows = 0;
+        clatch::countdownlatch cl(n_thread_ops);
+        // slow nodes in threads
+        for (int nid : slow_ops) {
+           const Node* node = cg.nodes[nid];
+           if (n_thread_ops > 0)
+              pool.push(do_node, (VariableIndex)nid, node, &nfxs, &cl);
+           else
+              do_node(1, (VariableIndex)nid, node, &nfxs, 0);
+        }
+        // first slow op runs in the main thread (concurrently with other slow ops).
+        if (first_slow_op > -1) {
+            const Node* node = cg.nodes[first_slow_op];
+            do_node(1, (VariableIndex)first_slow_op, node, &nfxs, 0);
+        }
+        // non-slow nodes in main thread (concurrently with the other slow ops).
+        for (int nid : by_depth[d]) {
+            if (nid < already_evaluated) continue;
+            const Node* node = cg.nodes[nid];
+            if (!node->slow()) {
+                do_node(1, (VariableIndex)nid, node, &nfxs, 0);
+            }
+        }
+        if (n_thread_ops > 0) { // if needed, wait for the threads to finish.
+        //auto start = std::chrono::system_clock::now(); 
+            cl.await();
+        //auto end = std::chrono::system_clock::now(); 
+        //std::chrono::duration<float> elapsed_seconds = end-start;
+        //cout << elapsed_seconds.count() << endl;
+        }
     }
   }
-  return nfxs[i];
+  return nfxs[upto];
 }
+
 
 void SimpleExecutionEngine::backward() {
   assert(nfxs.size() >= cg.nodes.size());

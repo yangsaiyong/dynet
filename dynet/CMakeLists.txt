@@ -78,6 +78,8 @@ set(dynet_library_HDRS
     nodes-macros.h
     weight-decay.h
     io-macros.h
+    ctpl_stl.h
+    countdownlatch.h
 )
 
 file(GLOB TEST_SRCS RELATIVE ${CMAKE_CURRENT_SOURCE_DIR} tests/*.cc)
