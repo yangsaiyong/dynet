@@ -8,6 +8,7 @@ namespace dynet {
 
 extern float weight_decay_lambda;
 extern unsigned ncpu;
+extern unsigned exp_exec;
 
 /**
  * \brief Represents general parameters for dynet
@@ -16,6 +17,7 @@ extern unsigned ncpu;
 struct DynetParams {
   unsigned random_seed = 0; /**< The seed for random number generation */
   unsigned ncpu = 1;
+  unsigned exp_exec = 1;
   std::string mem_descriptor = "512"; /**< Total memory to be allocated for Dynet */
   float weight_decay = 0; /**< Weight decay rate for L2 regularization */
   bool shared_parameters = false; /**< TO DOCUMENT */

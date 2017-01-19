@@ -25,7 +25,25 @@ class ExecutionEngine {
 
 class SimpleExecutionEngine : public ExecutionEngine {
  public:
-  explicit SimpleExecutionEngine(const ComputationGraph& cg) : ExecutionEngine(cg), pool(ncpu) {}
+  explicit SimpleExecutionEngine(const ComputationGraph& cg) : ExecutionEngine(cg) {}
+  void invalidate() override;
+  void invalidate(unsigned i) override;
+  const Tensor& forward() override;
+  const Tensor& forward(VariableIndex i) override;
+  const Tensor& incremental_forward() override;  // if you want to add nodes and evaluate just the new parts
+  const Tensor& incremental_forward(VariableIndex i) override;
+  const Tensor& get_value(VariableIndex i) override;
+  void backward() override;
+  void backward(VariableIndex i) override;
+ private:
+  std::vector<Tensor> nfxs;
+  std::vector<Tensor> ndEdfs;
+  VariableIndex num_nodes_evaluated;
+};
+
+class ExperimentalExecutionEngine : public SimpleExecutionEngine {
+ public:
+  explicit ExperimentalExecutionEngine(const ComputationGraph& cg) : SimpleExecutionEngine(cg), pool(ncpu) {}
   void invalidate() override;
   void invalidate(unsigned i) override;
   const Tensor& forward() override;
@@ -40,6 +58,11 @@ class SimpleExecutionEngine : public ExecutionEngine {
   std::vector<Tensor> ndEdfs;
   VariableIndex num_nodes_evaluated;
   ctpl::thread_pool pool;
+
+  std::vector<int> depths;
+  std::vector<int> depths2;
+  std::vector<std::vector<int>> by_depth;
+  std::vector<std::vector<int>> parents;
 };
 
 } // namespace dynet

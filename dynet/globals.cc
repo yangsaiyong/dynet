@@ -8,5 +8,6 @@ std::vector<Device*> devices;
 Device* default_device = nullptr;
 float weight_decay_lambda;
 unsigned ncpu;
+unsigned exp_exec;
 
 }

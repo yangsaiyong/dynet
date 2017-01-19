@@ -83,6 +83,17 @@ DynetParams extract_dynet_params(int& argc, char**& argv, bool shared_parameters
       }
     }
 
+    else if (arg == "--dynet-exp" || arg == "--dynet_exp") {
+      if ((argi + 1) > argc) {
+        cerr << "[dynet] --dynet-exp expects an argument (0 or 1)\n";
+        abort();
+      } else {
+        string a2 = argv[argi + 1];
+        istringstream c(a2); c >> params.exp_exec;
+        remove_args(argc, argv, argi, 2);
+      }
+    }
+
 #if HAVE_CUDA
     // Number of GPUs
     else if (arg == "--dynet_gpus" || arg == "--dynet-gpus") {
@@ -183,6 +194,7 @@ void initialize(DynetParams params) {
 
   // Set ncpus
   ncpu = params.ncpu;
+  exp_exec = params.exp_exec;
 
   // Allocate memory
   cerr << "[dynet] allocating memory: " << params.mem_descriptor << "MB\n";

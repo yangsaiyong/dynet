@@ -8,6 +8,7 @@ set(dynet_library_SRCS
     dict.cc
     dim.cc
     exec.cc
+    exec2.cc
     expr.cc
     fast-lstm.cc
     globals.cc
