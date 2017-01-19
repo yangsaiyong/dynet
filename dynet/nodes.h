@@ -4,6 +4,7 @@
 #include "dynet/dynet.h"
 #include "dynet/devices.h"
 #include "dynet/nodes-macros.h"
+#include "dynet/node-types.h"
 
 // See nodes-macros.h for more details about DYNET_NODE_DEFINE_DEV_IMPL().
 
@@ -181,6 +182,7 @@ struct ConstantMinusX : public Node {
 struct Sqrt : public Node {
   explicit Sqrt(const std::initializer_list<VariableIndex>& a) : Node(a) {}
   virtual bool supports_multibatch() const override { return true; }
+  virtual NodeType type_id() const override { return NodeType::Sqrt; }
   DYNET_NODE_DEFINE_DEV_IMPL()
 };
 
@@ -188,6 +190,7 @@ struct Sqrt : public Node {
 struct Erf : public Node {
   explicit Erf(const std::initializer_list<VariableIndex>& a) : Node(a) {}
   virtual bool supports_multibatch() const override { return true; }
+  virtual NodeType type_id() const override { return NodeType::Erf; }
   DYNET_NODE_DEFINE_DEV_IMPL()
 };
 
@@ -195,6 +198,7 @@ struct Erf : public Node {
 struct Tanh : public Node {
   explicit Tanh(const std::initializer_list<VariableIndex>& a) : Node(a) {}
   virtual bool supports_multibatch() const override { return true; }
+  virtual NodeType type_id() const override { return NodeType::Tanh; }
   DYNET_NODE_DEFINE_DEV_IMPL()
 };
 
@@ -216,6 +220,7 @@ struct Cube : public Node {
 struct Exp : public Node {
   explicit Exp(const std::initializer_list<VariableIndex>& a) : Node(a) {}
   virtual bool supports_multibatch() const override { return true; }
+  virtual NodeType type_id() const override { return NodeType::Exp; }
   DYNET_NODE_DEFINE_DEV_IMPL()
 };
 
@@ -223,6 +228,7 @@ struct Exp : public Node {
 struct LogGamma : public Node {
   explicit LogGamma(const std::initializer_list<VariableIndex>& a) : Node(a) {}
   virtual bool supports_multibatch() const override { return true; }
+  virtual NodeType type_id() const override { return NodeType::LogGamma; }
   DYNET_NODE_DEFINE_DEV_IMPL()
 };
 
@@ -230,6 +236,7 @@ struct LogGamma : public Node {
 struct Log : public Node {
   explicit Log(const std::initializer_list<VariableIndex>& a) : Node(a) {}
   virtual bool supports_multibatch() const override { return true; }
+  virtual NodeType type_id() const override { return NodeType::Log; }
   DYNET_NODE_DEFINE_DEV_IMPL()
 };
 
@@ -314,6 +321,7 @@ struct MatrixMultiply : public Node {
          if (x.size() > T) { _slow = true; return; }
       }
   }
+  virtual NodeType type_id() const override { return NodeType::MatrixMultiply; }
   bool _slow; // = false;
   DYNET_NODE_DEFINE_DEV_IMPL()
 };
@@ -322,6 +330,7 @@ struct MatrixMultiply : public Node {
 struct CwiseMultiply : public Node {
   explicit CwiseMultiply(const std::initializer_list<VariableIndex>& a) : Node(a) {}
   virtual bool supports_multibatch() const override { return true; }
+  virtual NodeType type_id() const override { return NodeType::CwiseMultiply; }
   DYNET_NODE_DEFINE_DEV_IMPL()
 };
 
@@ -329,6 +338,7 @@ struct CwiseMultiply : public Node {
 struct CwiseQuotient : public Node {
   explicit CwiseQuotient(const std::initializer_list<VariableIndex>& a) : Node(a) {}
   virtual bool supports_multibatch() const override { return true; }
+  virtual NodeType type_id() const override { return NodeType::CwiseQuotient; }
   DYNET_NODE_DEFINE_DEV_IMPL()
 };
 
@@ -344,6 +354,7 @@ struct AffineTransform : public Node {
       }
   }
   bool _slow; // = false;
+  virtual NodeType type_id() const override { return NodeType::AffineTransform; }
   DYNET_NODE_DEFINE_DEV_IMPL()
   mutable float* dEdf_mem;
 };
@@ -352,6 +363,7 @@ struct AffineTransform : public Node {
 struct Negate : public Node {
   explicit Negate(const std::initializer_list<VariableIndex>& a) : Node(a) {}
   virtual bool supports_multibatch() const override { return true; } 
+  virtual NodeType type_id() const override { return NodeType::Negate; }
   DYNET_NODE_DEFINE_DEV_IMPL()
 };
 
@@ -359,6 +371,7 @@ struct Negate : public Node {
 struct Rectify : public Node {
   explicit Rectify(const std::initializer_list<VariableIndex>& a) : Node(a) {}
   virtual bool supports_multibatch() const override { return true; }
+  virtual NodeType type_id() const override { return NodeType::Rectify; }
   DYNET_NODE_DEFINE_DEV_IMPL()
 };
 
@@ -451,6 +464,7 @@ struct L1Distance : public Node {
 struct LogisticSigmoid : public Node {
   explicit LogisticSigmoid(const std::initializer_list<VariableIndex>& a) : Node(a) {}
   virtual bool supports_multibatch() const override { return true; }
+  virtual NodeType type_id() const override { return NodeType::Sigmoid; }
   DYNET_NODE_DEFINE_DEV_IMPL()
 };
 

@@ -5,6 +5,7 @@
 #include <thread>
 #include <chrono>
 #include "dynet/countdownlatch.h"
+#include "dynet/nodes.h"
 using namespace std;
 
 namespace dynet {
@@ -13,6 +14,8 @@ void time_it(int id, clatch::countdownlatch *cl) {
     cl->count_down();
     return;
 }
+
+const set<NodeType> ewise_unary_nodes { NodeType::Tanh, NodeType::Rectify, NodeType::Sigmoid, NodeType::Erf, NodeType::Sqrt, NodeType::Exp, NodeType::LogGamma, NodeType::Log, NodeType::Negate };
 
 // this can run in a different thread, given that the memory is initialized.
 void do_node(int id, VariableIndex node_id, const Node *node, std::vector<Tensor> *nfxs,
@@ -38,6 +41,57 @@ void do_node(int id, VariableIndex node_id, const Node *node, std::vector<Tensor
     }
 }
 
+const void eval_ewise_unaries_in_bulk(
+        vector<int> &nids, const ComputationGraph &cg, vector<Tensor> *nfxs) {
+
+    if (nids.size() > 10) {
+        const Node* first_node = cg.nodes[nids[0]];
+        size_t size = 0;
+        // allocate temp memory for the args and copy args
+        AlignedMemoryPool *mempool = (*nfxs)[nids[0]].device->pools[(int)DeviceMempool::FXS];
+        const size_t allocator_state = mempool->used;
+        float *v_dest = nullptr;
+        for (auto nid : nids) {
+            const Node* node = cg.nodes[nid];
+            assert(node->args.size() == 1);
+            VariableIndex arg = node->args[0];
+            const size_t sz = cg.nodes[arg]->dim.size() * sizeof(float);
+            float *dest = static_cast<float*>(mempool->allocate(sz));
+            if (!dest) throw std::runtime_error("aux out of memory");
+#if HAVE_CUDA
+            cudaMemcpyAsync(dest, (*nfxs)[arg].v, sz, cudaMemcpyDeviceToDevice);
+#else
+            memcpy(dest, (*nfxs)[arg].v, sz);
+#endif
+            size += sz;
+            if (!v_dest) v_dest = dest;
+        }
+        // shouldn't I use this and not the sum of sizes bc the alignment issues (is this legit?)
+        size = mempool->used - allocator_state; 
+        unsigned int new_dim = size/sizeof(float);
+
+        // create a tensor for the bulk args
+        Tensor z(Dim({new_dim}), v_dest, (*nfxs)[0].device, (*nfxs)[0].mem_pool);
+        const vector<const Tensor*> xs { &z };
+        // apply the (first) node on the bulk tensor.
+        Tensor *fxs = &(*nfxs)[nids[0]];
+        Dim orig = fxs->d;
+        fxs->d = Dim({(new_dim)});
+        first_node->forward(xs, *fxs);
+        fxs->d = orig;
+        // deallocte the temp memory
+        mempool->used = allocator_state;
+    } else { // just apply each of them individually
+    //auto start = std::chrono::system_clock::now(); 
+        for (auto nid : nids) {
+            do_node(0, (VariableIndex)nid, cg.nodes[nid], nfxs, 0);
+        }
+    //auto end = std::chrono::system_clock::now(); 
+    //std::chrono::duration<float> elapsed_seconds = end-start;
+    //cout << "alloc and copy :" << elapsed_seconds.count() << endl;
+    }
+}
+
 const Tensor& ExperimentalExecutionEngine::incremental_forward(VariableIndex upto) {
   assert(upto < cg.nodes.size());
   if (upto < num_nodes_evaluated) { return nfxs[upto]; }
@@ -60,7 +114,6 @@ const Tensor& ExperimentalExecutionEngine::incremental_forward(VariableIndex upt
 
   // depth of a node is max depth of its daughtets, +1.
   // TODO consider tracking depths on the nodes as graph is created? or at least incrementally?
-  // TODO: don't bother looking at already evaluated nodes?
   depths.resize(upto+1);
   parents.resize(upto+1);
   int max_depth=0;
@@ -99,19 +152,22 @@ const Tensor& ExperimentalExecutionEngine::incremental_forward(VariableIndex upt
   for (int j=already_evaluated; j<depths2.size(); ++j) {
       by_depth[depths2[j]].push_back(j);
   }
-  /*
+  
+  // print the depths structure
+  if (false) {
       for (int d=0; d<by_depth.size(); ++d) {
-          cout << "depths " << d << " -> " << by_depth[d].size() << endl;;
+          cout << "depths " << d << " : " << by_depth[d].size() << endl;;
           for (int nid : by_depth[d]) {
               const Node* node = cg.nodes[nid];
               vector<string> a;
               for (auto arg : node->args) { a.push_back(string("v") + to_string(arg)); }
-              cout <<  "  " << nid << "  " << cg.nodes[nid]->as_string(a) << " (" << cg.nodes[nid]->dim << ")" << endl;
+              cout <<  "  " << nid << " |||  " << cg.nodes[nid]->as_string(a) << " ||| " << cg.nodes[nid]->dim << " ||| " ;
+              for (auto a_ : a) { cout << " " << a_ ; }
+              cout << endl;
           }
           cout << endl;
       }
-  */
-      
+  } 
 
   // free any old memory if this is a new CG
   if (num_nodes_evaluated == 0)
@@ -123,85 +179,124 @@ const Tensor& ExperimentalExecutionEngine::incremental_forward(VariableIndex upt
     // memory allocation and preparation.
     // TODO have allocation consider later threading, by giving the "slow" nodes
     //      memory on different pages? or otherwise order memory according to threading?
-    for (; num_nodes_evaluated <= upto; ++num_nodes_evaluated) {
-        const Node* node = cg.nodes[num_nodes_evaluated];
-        nfxs[num_nodes_evaluated].d = node->dim;
-        // Get the device
-        assert(node->device != nullptr);
-        nfxs[num_nodes_evaluated].device = node->device;
-        // Get the memory
-        nfxs[num_nodes_evaluated].v = static_cast<float*>(nfxs[num_nodes_evaluated].device->pools[(int)DeviceMempool::FXS]->allocate(node->dim.size() * sizeof(float)));
-        /*
-            cout << "allocating memory for " << num_nodes_evaluated << " size: " << node->dim.size() * sizeof(float) << " addr: " << nfxs[num_nodes_evaluated].v;
-            for (int i = 0; i < 5; i++) {
-            cout << " " << nfxs[num_nodes_evaluated].v[i];
-            }
-            cout << endl; 
-        */
-        if (nfxs[num_nodes_evaluated].v == nullptr)
-            throw std::runtime_error("out of memory");
-        void* aux_mem = nullptr;
-        size_t aux_size = node->aux_storage_size();
-        if (aux_size) {
-            aux_mem = nfxs[num_nodes_evaluated].device->pools[(int)DeviceMempool::FXS]->allocate(aux_size);
-            if (!aux_mem)
-                throw std::runtime_error("aux out of memory");
+    for (int d=0; d<by_depth.size(); ++d) {
+        map<NodeType,vector<int>> by_type;
+        for (int nid : by_depth[d]) {
+            if (nid < already_evaluated) continue;
+            const Node* node = cg.nodes[nid];
+            by_type[node->type_id()].push_back(nid);
         }
-        node->aux_mem = aux_mem;
+        for (auto it = by_type.begin(); it != by_type.end(); ++it) {
+            // after this loop, the output of each node "type" will be contiguous
+            // in memory. This means that we can *produce* them all in a single op,
+            // if supported.
+            // This is not optimal, as it still requires copying of the args before applying
+            // the op.  Ideally, args will be arranged to be in the correct locations beforehand.
+            // Also note that currently the types do not have fine enough distinction
+            // for working for MatrixMultiply and AffineTransform.
+            for (auto nid : it->second) {
+                const Node* node = cg.nodes[nid];
+                nfxs[nid].d = node->dim;
+                // Get the device
+                assert(node->device != nullptr);
+                nfxs[nid].device = node->device;
+
+                // Get the memory
+                nfxs[nid].v = static_cast<float*>(nfxs[nid].device->pools[(int)DeviceMempool::FXS]->allocate(node->dim.size() * sizeof(float)));
+                /*
+                   cout << "allocating memory for " << num_nodes_evaluated << " size: " << node->dim.size() * sizeof(float) << " addr: " << nfxs[num_nodes_evaluated].v;
+                   for (int i = 0; i < 5; i++) {
+                   cout << " " << nfxs[num_nodes_evaluated].v[i];
+                   }
+                   cout << endl; 
+                 */
+                if (nfxs[nid].v == nullptr)
+                    throw std::runtime_error("out of memory");
+                void* aux_mem = nullptr;
+                size_t aux_size = node->aux_storage_size();
+                if (aux_size) {
+                    aux_mem = nfxs[nid].device->pools[(int)DeviceMempool::FXS]->allocate(aux_size);
+                    if (!aux_mem)
+                        throw std::runtime_error("aux out of memory");
+                }
+                node->aux_mem = aux_mem;
+            }
+        }
+        // apply nodes for current depth
+        for (auto it = by_type.begin(); it != by_type.end(); ++it) {
+            if (ewise_unary_nodes.find(it->first) != ewise_unary_nodes.end()) {
+                eval_ewise_unaries_in_bulk(it->second, cg, &nfxs);
+            } else {
+                for (auto nid : it->second) {
+                    do_node(1, (VariableIndex)nid, cg.nodes[nid], &nfxs, 0);
+                }
+            }
+        }
 
     }
+    num_nodes_evaluated = upto; // or is it upto + 1?
 
+    return nfxs[upto];
     /*
         for (unsigned nid = already_evaluated; nid <= upto; ++nid) {
         const Node* node = cg.nodes[nid];
         do_node(1, (VariableIndex)nid, node, &nfxs, 0);
         }*/
 
+    // TODO this is a mess now
     // memory is allocated, execute graph (possibly in threads)
     for (int d=0; d<by_depth.size(); ++d) {
-        vector<int> slow_ops;
-        int first_slow_op = -1;
-        for (int nid : by_depth[d]) {
-            if (nid < already_evaluated) continue;
-            if (cg.nodes[nid]->slow()) slow_ops.push_back(nid);
-        }
-        if (slow_ops.size() > 0) {
-            first_slow_op = slow_ops.back();
-            slow_ops.pop_back();
-        }
-        int n_thread_ops = slow_ops.size();
-        //if (slows < 2) slows = 0;
-        //cout << slow_ops.size() << "/" << by_depth[d].size() << endl;
-        if (ncpu <= 1) n_thread_ops = 0;
-        //slows = 0;
-        clatch::countdownlatch cl(n_thread_ops);
-        // slow nodes in threads
-        for (int nid : slow_ops) {
-            const Node* node = cg.nodes[nid];
-            if (n_thread_ops > 0)
-                pool.push(do_node, (VariableIndex)nid, node, &nfxs, &cl);
-            else
-                do_node(1, (VariableIndex)nid, node, &nfxs, 0);
-        }
-        // first slow op runs in the main thread (concurrently with other slow ops).
-        if (first_slow_op > -1) {
-            const Node* node = cg.nodes[first_slow_op];
-            do_node(1, (VariableIndex)first_slow_op, node, &nfxs, 0);
-        }
-        // non-slow nodes in main thread (concurrently with the other slow ops).
+        map<NodeType,vector<int>> by_type;
         for (int nid : by_depth[d]) {
             if (nid < already_evaluated) continue;
             const Node* node = cg.nodes[nid];
-            if (!node->slow()) {
-                do_node(1, (VariableIndex)nid, node, &nfxs, 0);
+            by_type[node->type_id()].push_back(nid);
+        }
+        for (auto it = by_type.begin(); it != by_type.end(); ++it) {
+            vector<int> slow_ops;
+            int first_slow_op = -1;
+            for (int nid : by_depth[d]) {
+                if (nid < already_evaluated) continue;
+                if (cg.nodes[nid]->slow()) slow_ops.push_back(nid);
             }
-        }
-        if (n_thread_ops > 0) { // if needed, wait for the threads to finish.
-            //auto start = std::chrono::system_clock::now(); 
-            cl.await();
-            //auto end = std::chrono::system_clock::now(); 
-            //std::chrono::duration<float> elapsed_seconds = end-start;
-            //cout << elapsed_seconds.count() << endl;
+            if (slow_ops.size() > 0) {
+                first_slow_op = slow_ops.back();
+                slow_ops.pop_back();
+            }
+            int n_thread_ops = slow_ops.size();
+            //if (slows < 2) slows = 0;
+            //cout << slow_ops.size() << "/" << by_depth[d].size() << endl;
+            if (ncpu <= 1) n_thread_ops = 0;
+            //slows = 0;
+            clatch::countdownlatch cl(n_thread_ops);
+            // slow nodes in threads
+            for (int nid : slow_ops) {
+                const Node* node = cg.nodes[nid];
+                if (n_thread_ops > 0)
+                    pool.push(do_node, (VariableIndex)nid, node, &nfxs, &cl);
+                else
+                    do_node(1, (VariableIndex)nid, node, &nfxs, 0);
+            }
+            // first slow op runs in the main thread (concurrently with other slow ops).
+            if (first_slow_op > -1) {
+                const Node* node = cg.nodes[first_slow_op];
+                do_node(1, (VariableIndex)first_slow_op, node, &nfxs, 0);
+            }
+            // non-slow nodes in main thread (concurrently with the other slow ops).
+            for (int nid : by_depth[d]) {
+                if (nid < already_evaluated) continue;
+                const Node* node = cg.nodes[nid];
+                if (!node->slow()) {
+                    do_node(1, (VariableIndex)nid, node, &nfxs, 0);
+                }
+            }
+            if (n_thread_ops > 0) { // if needed, wait for the threads to finish.
+                //auto start = std::chrono::system_clock::now(); 
+                cl.await();
+                //auto end = std::chrono::system_clock::now(); 
+                //std::chrono::duration<float> elapsed_seconds = end-start;
+                //cout << elapsed_seconds.count() << endl;
+            }
         }
     }
     return nfxs[upto];

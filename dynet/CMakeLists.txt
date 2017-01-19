@@ -81,6 +81,7 @@ set(dynet_library_HDRS
     io-macros.h
     ctpl_stl.h
     countdownlatch.h
+    node-types.h
 )
 
 file(GLOB TEST_SRCS RELATIVE ${CMAKE_CURRENT_SOURCE_DIR} tests/*.cc)
