@@ -63,6 +63,10 @@ class ExperimentalExecutionEngine : public SimpleExecutionEngine {
   std::vector<int> depths2;
   std::vector<std::vector<int>> by_depth;
   std::vector<std::vector<int>> parents;
+
+  void compute_depths(VariableIndex upto);
+
+  void _print_nodes_by_depth() const;
 };
 
 } // namespace dynet

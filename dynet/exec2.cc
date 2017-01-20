@@ -3,9 +3,9 @@
 #include "dynet/param-nodes.h"
 #include "dynet/globals.h"
 #include <thread>
-#include <chrono>
 #include "dynet/countdownlatch.h"
 #include "dynet/nodes.h"
+#include "dynet/timing.h"
 using namespace std;
 
 namespace dynet {
@@ -14,6 +14,15 @@ void time_it(int id, clatch::countdownlatch *cl) {
     cl->count_down();
     return;
 }
+
+struct BulkOpInfo {
+    vector<Tensor*> output_tensors;
+    Tensor *output_tmp; // preallocated tensor for temp storage;
+    // first dim is the arg num, second is the list of values for the arg.
+    vector<vector<Tensor*>> input_tensors;
+    vector<Tensor*> input_tmp;
+    Node *op;
+};
 
 const set<NodeType> ewise_unary_nodes { NodeType::Tanh, NodeType::Rectify, NodeType::Sigmoid, NodeType::Erf, NodeType::Sqrt, NodeType::Exp, NodeType::LogGamma, NodeType::Log, NodeType::Negate };
 
@@ -27,15 +36,7 @@ void do_node(int id, VariableIndex node_id, const Node *node, std::vector<Tensor
         xs[ai] = &(*nfxs)[arg];
         ++ai;
     }
-    //if (node->slow()) {
-        //auto start = std::chrono::system_clock::now(); 
-        node->forward(xs, (*nfxs)[node_id]);
-        //auto end = std::chrono::system_clock::now(); 
-        //std::chrono::duration<float> elapsed_seconds = end-start;
-        //cout << "node:" << node_id << " time:" << elapsed_seconds.count() << endl;
-    //} else {
-    //    node->forward(xs, (*nfxs)[node_id]);
-    //}
+    node->forward(xs, (*nfxs)[node_id]);
     if (cl) {
         cl->count_down();
     }
@@ -109,36 +110,16 @@ const void eval_matrix_multiply(
         combine_tensors(vs, &V);
         V.d = Dim({vs[0]->d.rows(), (unsigned)vs.size()});
         const vector<const Tensor*> xs { W, &V };
-        //for (int i = 0; i < 5; ++i) { cout << " " << V.v[100+i] ; }
-        //cout << endl;
-
-        //cout << "W dim:" << W->d << endl;
-        //cout << "vs[0].dim" << vs[0]->d << endl;
-        //cout << "vs.size " << vs.size() << endl;
-        //for (auto x : vs) {
-        //    for (int i = 0; i < 5; ++i) { cout << " " << x->v[0+i] ; }
-        //    cout << endl;
-        //}
-        //cout << endl;
-        //for (int j = 0; j < 20; j++) {
-        //    for (int i = 0; i < 5; ++i) { cout << " " << V.v[j*10+i] ; }
-        //    cout << endl;
-        //}
-        //cout << endl;
         
         // allocate a matrix for the result
         Tensor result;
         result.d = Dim({W->d.rows(), (unsigned)vs.size()});
-        //cout << "result.d " << result.d << endl;
         result.v = static_cast<float*>(mempool->allocate(result.d.size() * sizeof(float)));
         result.device = W->device;
 
-        //cout << "before fwd:"; for (int i = 0; i < 5; ++i) { cout << " " << result.v[0+i] ; } cout << endl;
         // apply the forward op
         cg.nodes[nids[0]]->forward(xs, result);
 
-        //cout << "after fwd:"; for (int i = 0; i < 5; ++i) { cout << " " << result.v[0+i] ; } cout << endl;
-        //cout << "after fwd:"; for (int i = 0; i < 5; ++i) { cout << " " << result.v[30+i] ; } cout << endl;
         // distribute the result tensor (copy) back to where the results are expected
         unsigned offset = 0;
         for (auto nid : nids) {
@@ -202,32 +183,24 @@ const void eval_ewise_unaries_in_bulk(
         // deallocte the temp memory
         mempool->used = allocator_state;
     } else { // just apply each of them individually
-    //auto start = std::chrono::system_clock::now(); 
         for (auto nid : nids) {
             do_node(0, (VariableIndex)nid, cg.nodes[nid], nfxs, 0);
         }
-    //auto end = std::chrono::system_clock::now(); 
-    //std::chrono::duration<float> elapsed_seconds = end-start;
-    //cout << "alloc and copy :" << elapsed_seconds.count() << endl;
     }
 }
 
-const Tensor& ExperimentalExecutionEngine::incremental_forward(VariableIndex upto) {
-  assert(upto < cg.nodes.size());
-  if (upto < num_nodes_evaluated) { return nfxs[upto]; }
-
-  int already_evaluated = num_nodes_evaluated;
-
+void ExperimentalExecutionEngine::compute_depths(VariableIndex upto) {
   // depth of a node is max depth of its daughtets, +1.
   // TODO consider tracking depths on the nodes as graph is created? or at least incrementally?
+  const int already_evaluated = num_nodes_evaluated;
   depths.resize(upto+1);
   parents.resize(upto+1);
   int max_depth=0;
-  for (int j=already_evaluated; j<upto+1; ++j) { depths[j] = 0; } // how do I initialize to zeros?
+  std::fill(depths.begin()+already_evaluated, depths.begin()+upto+1, 0);
   for (int j=already_evaluated; j<upto+1; ++j) {
       const Node* node = cg.nodes[j];
       for (VariableIndex arg : node->args) {
-          parents[arg].push_back(j); // track parents
+          parents[arg].push_back(j);
           if (depths[arg]+1 > depths[j]) {
               depths[j] = depths[arg]+1;
               if (depths[j] > max_depth) { max_depth = depths[j]; }
@@ -258,93 +231,111 @@ const Tensor& ExperimentalExecutionEngine::incremental_forward(VariableIndex upt
   for (int j=already_evaluated; j<depths2.size(); ++j) {
       by_depth[depths2[j]].push_back(j);
   }
-  
-  // print the depths structure
-  if (false) {
-      for (int d=0; d<by_depth.size(); ++d) {
-          cout << "depths " << d << " : " << by_depth[d].size() << endl;;
-          for (int nid : by_depth[d]) {
-              const Node* node = cg.nodes[nid];
-              vector<string> a;
-              for (auto arg : node->args) { a.push_back(string("v") + to_string(arg)); }
-              cout <<  "  " << nid << " |||  " << cg.nodes[nid]->as_string(a) << " ||| " << cg.nodes[nid]->dim << " ||| " ;
-              for (auto a_ : a) { cout << " " << a_ ; }
-              cout << endl;
-          }
-          cout << endl;
-      }
-  } 
+}
+
+// print the depths structure, for debug etc.
+void ExperimentalExecutionEngine::_print_nodes_by_depth() const {
+    for (int d=0; d<by_depth.size(); ++d) {
+        cout << "depths " << d << " : " << by_depth[d].size() << endl;;
+        for (int nid : by_depth[d]) {
+            const Node* node = cg.nodes[nid];
+            vector<string> a;
+            for (auto arg : node->args) { a.push_back(string("v") + to_string(arg)); }
+            cout <<  "  " << nid << " |||  " << cg.nodes[nid]->as_string(a) << " ||| " << cg.nodes[nid]->dim << " ||| " ;
+            for (auto a_ : a) { cout << " " << a_ ; }
+            cout << endl;
+        }
+        cout << endl;
+    }
+}
+
+const Tensor& ExperimentalExecutionEngine::incremental_forward(VariableIndex upto) {
+  assert(upto < cg.nodes.size());
+  // don't do any work if we don't need to.
+  if (upto < num_nodes_evaluated) { return nfxs[upto]; }
+
+  const int already_evaluated = num_nodes_evaluated;
 
   // free any old memory if this is a new CG
-  if (num_nodes_evaluated == 0)
+  if (already_evaluated == 0) {
     for(Device* dev : dynet::devices)
       dev->pools[(int)DeviceMempool::FXS]->free();
+  }
 
-    nfxs.resize(upto + 1);
+  compute_depths(upto);
+  
+  if (false) _print_nodes_by_depth();
 
-    // memory allocation and preparation.
-    // TODO have allocation consider later threading, by giving the "slow" nodes
-    //      memory on different pages? or otherwise order memory according to threading?
-    for (int d=0; d<by_depth.size(); ++d) {
-        map<NodeType,vector<int>> by_type;
-        for (int nid : by_depth[d]) {
-            if (nid < already_evaluated) continue;
-            const Node* node = cg.nodes[nid];
-            by_type[node->type_id()].push_back(nid);
-        }
-        for (auto it = by_type.begin(); it != by_type.end(); ++it) {
-            // after this loop, the output of each node "type" will be contiguous
-            // in memory. This means that we can *produce* them all in a single op,
-            // if supported.
-            // This is not optimal, as it still requires copying of the args before applying
-            // the op.  Ideally, args will be arranged to be in the correct locations beforehand.
-            // Also note that currently the types do not have fine enough distinction
-            // for working for MatrixMultiply and AffineTransform.
-            unsigned total_dsize = 0;
-            for (auto nid : it->second) {
-                const Node* node = cg.nodes[nid];
-                nfxs[nid].d = node->dim;
-                // Get the device
-                assert(node->device != nullptr);
-                nfxs[nid].device = node->device;
-                // get the memory requirement
-                total_dsize += node->dim.size();
-                void* aux_mem = nullptr;
-                size_t aux_size = node->aux_storage_size();
-                if (aux_size) {
-                    aux_mem = nfxs[nid].device->pools[(int)DeviceMempool::FXS]->allocate(aux_size);
-                    if (!aux_mem)
-                        throw std::runtime_error("aux out of memory");
-                }
-                node->aux_mem = aux_mem;
-            }
-            // allocate in bulk to not have alignment between each element.
-            float *base = static_cast<float*>(nfxs[it->second[0]].device->pools[(int)DeviceMempool::FXS]->allocate(total_dsize*sizeof(float)));
-            if (base == nullptr) 
-                    throw std::runtime_error("out of memory");
-            // now set the mem for each node
-            unsigned offset = 0;
-            for (auto nid : it->second) {
-                const Node* node = cg.nodes[nid];
-                // set the mem location
-                nfxs[nid].v = base + offset; // already *sizeof(float) b.c pointer arith
-                offset += node->dim.size();
-            }
-        }
-        // apply nodes for current depth
-        for (auto it = by_type.begin(); it != by_type.end(); ++it) {
-            if (ewise_unary_nodes.find(it->first) != ewise_unary_nodes.end()) {
-                eval_ewise_unaries_in_bulk(it->second, cg, &nfxs);
-            } else if (it->first == NodeType::MatrixMultiply && it->second.size() > 5) {
-                eval_matrix_multiply(it->second, cg, &nfxs);
-            } else {
-                for (auto nid : it->second) {
-                    do_node(1, (VariableIndex)nid, cg.nodes[nid], &nfxs, 0);
-                }
-            }
-        }
+  nfxs.resize(upto + 1);
 
+  // memory allocation and preparation.
+  // TODO have allocation consider later threading, by giving the "slow" nodes
+  //      memory on different pages? or otherwise order memory according to threading?
+  for (int d=0; d<by_depth.size(); ++d) {
+    vector<BulkOpInfo> matrixMult;
+    vector<BulkOpInfo> ewiseUnary;
+    vector<BulkOpInfo> other;
+    map<NodeType,vector<int>> by_type;
+    for (int nid : by_depth[d]) {
+      if (nid < already_evaluated) continue;
+      const Node* node = cg.nodes[nid];
+      by_type[node->type_id()].push_back(nid);
     }
+    for (auto it = by_type.begin(); it != by_type.end(); ++it) {
+      // after this loop, the output of each node "type" will be contiguous
+      // in memory. This means that we can *produce* them all in a single op,
+      // if supported.
+      // This is not optimal, as it still requires copying of the args before applying
+      // the op.  Ideally, args will be arranged to be in the correct locations beforehand.
+      // Also note that currently the types do not have fine enough distinction
+      // for working for MatrixMultiply and AffineTransform.
+      const auto type = it->first;
+      const auto nids = it->secondl
+        unsigned total_dsize = 0;
+      for (auto nid : it->second) {
+        const Node* node = cg.nodes[nid];
+        nfxs[nid].d = node->dim;
+        // Get the device
+        assert(node->device != nullptr);
+        nfxs[nid].device = node->device;
+        // get the memory requirement
+        total_dsize += node->dim.size();
+        void* aux_mem = nullptr;
+        size_t aux_size = node->aux_storage_size();
+        if (aux_size) {
+          aux_mem = nfxs[nid].device->pools[(int)DeviceMempool::FXS]->allocate(aux_size);
+          if (!aux_mem)
+            throw std::runtime_error("aux out of memory");
+        }
+        node->aux_mem = aux_mem;
+      }
+      // allocate in bulk to not have alignment between each element.
+      float *base = static_cast<float*>(nfxs[it->second[0]].device->pools[(int)DeviceMempool::FXS]->allocate(total_dsize*sizeof(float)));
+      if (base == nullptr) 
+        throw std::runtime_error("out of memory");
+      // now set the mem for each node
+      unsigned offset = 0;
+      for (auto nid : it->second) {
+        const Node* node = cg.nodes[nid];
+        // set the mem location
+        nfxs[nid].v = base + offset; // already *sizeof(float) b.c pointer arith
+        offset += node->dim.size();
+      }
+    }
+    // apply nodes for current depth
+    for (auto it = by_type.begin(); it != by_type.end(); ++it) {
+      if (ewise_unary_nodes.find(it->first) != ewise_unary_nodes.end()) {
+        eval_ewise_unaries_in_bulk(it->second, cg, &nfxs);
+      } else if (it->first == NodeType::MatrixMultiply && it->second.size() > 5) {
+        eval_matrix_multiply(it->second, cg, &nfxs);
+      } else {
+        for (auto nid : it->second) {
+          do_node(1, (VariableIndex)nid, cg.nodes[nid], &nfxs, 0);
+        }
+      }
+    }
+
+  }
     num_nodes_evaluated = upto; // or is it upto + 1?
 
     return nfxs[upto];
@@ -402,11 +393,7 @@ const Tensor& ExperimentalExecutionEngine::incremental_forward(VariableIndex upt
                 }
             }
             if (n_thread_ops > 0) { // if needed, wait for the threads to finish.
-                //auto start = std::chrono::system_clock::now(); 
                 cl.await();
-                //auto end = std::chrono::system_clock::now(); 
-                //std::chrono::duration<float> elapsed_seconds = end-start;
-                //cout << elapsed_seconds.count() << endl;
             }
         }
     }
