@@ -318,10 +318,12 @@ struct MatrixMultiply : public Node {
       assert(xs.size() == 2);
       const int T = 100*100; // TODO tune this value? or the fomula in general.
 
-      if (xs[0].nd==2 && xs[1].nd==1) _type = NodeType::MatrixMultiply2x1;
+      if (xs[0].bd > 1 || xs[1].bd > 1) _type = NodeType::UNK; // not supported
+      else if (xs[0].nd==2 && xs[0].rows()>1 && xs[1].nd==1) _type = NodeType::MatrixMultiply2x1;
       else if (xs[0].nd==1 && xs[1].nd==1) _type = NodeType::MatrixMultiply1x1;
       else if (xs[0].nd==1 && xs[1].nd==2) _type = NodeType::MatrixMultiply1x2;
       else if (xs[0].nd==2 && xs[1].nd==2) _type = NodeType::MatrixMultiply2x2;
+      else _type = NodeType::UNK;
 
       for (auto x : xs) {
          if (x.size() > T) { _slow = true; return; }

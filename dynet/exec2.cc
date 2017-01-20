@@ -247,7 +247,7 @@ void ExperimentalExecutionEngine::_print_nodes_by_depth() const {
 const Tensor& ExperimentalExecutionEngine::incremental_forward(VariableIndex upto) {
   assert(upto < cg.nodes.size());
   // don't do any work if we don't need to.
-  if (upto <= num_nodes_evaluated) { return nfxs[upto]; }
+  if (upto < num_nodes_evaluated) { return nfxs[upto]; }
 
   const int already_evaluated = num_nodes_evaluated;
 
@@ -324,7 +324,7 @@ const Tensor& ExperimentalExecutionEngine::incremental_forward(VariableIndex upt
     }
 
   }
-  num_nodes_evaluated = upto; // or is it upto + 1?
+  num_nodes_evaluated = upto+1;
 
   return nfxs[upto];
 }

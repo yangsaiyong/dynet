@@ -2,6 +2,7 @@
 
 #include "dynet/param-nodes.h"
 #include "dynet/globals.h"
+#include "dynet/timing.h"
 
 using namespace std;
 
