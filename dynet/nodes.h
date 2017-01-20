@@ -317,12 +317,19 @@ struct MatrixMultiply : public Node {
   virtual void set_slowness(const std::vector<Dim> &xs) override { 
       assert(xs.size() == 2);
       const int T = 100*100; // TODO tune this value? or the fomula in general.
+
+      if (xs[0].nd==2 && xs[1].nd==1) _type = NodeType::MatrixMultiply2x1;
+      else if (xs[0].nd==1 && xs[1].nd==1) _type = NodeType::MatrixMultiply1x1;
+      else if (xs[0].nd==1 && xs[1].nd==2) _type = NodeType::MatrixMultiply1x2;
+      else if (xs[0].nd==2 && xs[1].nd==2) _type = NodeType::MatrixMultiply2x2;
+
       for (auto x : xs) {
          if (x.size() > T) { _slow = true; return; }
       }
   }
-  virtual NodeType type_id() const override { return NodeType::MatrixMultiply; }
+  virtual NodeType type_id() const override { return _type; }
   bool _slow; // = false;
+  NodeType _type;
   DYNET_NODE_DEFINE_DEV_IMPL()
 };
 

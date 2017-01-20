@@ -27,166 +27,144 @@ struct BulkOpInfo {
 const set<NodeType> ewise_unary_nodes { NodeType::Tanh, NodeType::Rectify, NodeType::Sigmoid, NodeType::Erf, NodeType::Sqrt, NodeType::Exp, NodeType::LogGamma, NodeType::Log, NodeType::Negate };
 
 // this can run in a different thread, given that the memory is initialized.
-void do_node(int id, VariableIndex node_id, const Node *node, std::vector<Tensor> *nfxs,
-        clatch::countdownlatch *cl) {
-    vector<const Tensor*> xs(16);
-    xs.resize(node->arity());
-    unsigned ai = 0;
-    for (VariableIndex arg : node->args) {
-        xs[ai] = &(*nfxs)[arg];
-        ++ai;
-    }
-    node->forward(xs, (*nfxs)[node_id]);
-    if (cl) {
-        cl->count_down();
-    }
+void do_node(int id, VariableIndex node_id, const Node *node, std::vector<Tensor> *nfxs, clatch::countdownlatch *cl) {
+  vector<const Tensor*> xs(16);
+  xs.resize(node->arity());
+  unsigned ai = 0;
+  for (VariableIndex arg : node->args) {
+    xs[ai] = &(*nfxs)[arg];
+    ++ai;
+  }
+  node->forward(xs, (*nfxs)[node_id]);
+  if (cl) {
+    cl->count_down();
+  }
 }
 
 // copies the list of tensors into a single contig tensor (tout).
 // allocates the memory for tout.
 const void combine_tensors(const vector<Tensor*> &ts, Tensor *tout) {
-    // determine needed memory
-    unsigned total_dsize = 0;
-    for (auto t : ts) {
-        total_dsize += t->d.size();
-    }
-    // allocate
-    float* dest = static_cast<float*>(ts[0]->device->pools[(int)DeviceMempool::FXS]->allocate(total_dsize * sizeof(float)));
-    tout->d = Dim({total_dsize});
-    tout->v = dest;
-    // copy
-    for (auto t : ts) {
-        const size_t sz = t->d.size();
+  // determine needed memory
+  unsigned total_dsize = 0;
+  for (auto t : ts) {
+    total_dsize += t->d.size();
+  }
+  // allocate
+  float* dest = static_cast<float*>(ts[0]->device->pools[(int)DeviceMempool::FXS]->allocate(total_dsize * sizeof(float)));
+  tout->d = Dim({total_dsize});
+  tout->v = dest;
+  // copy
+  for (auto t : ts) {
+    const size_t sz = t->d.size();
 
 #if HAVE_CUDA
-        cudaMemcpyAsync(dest, t->v, sz*sizeof(float), cudaMemcpyDeviceToDevice);
+    cudaMemcpyAsync(dest, t->v, sz*sizeof(float), cudaMemcpyDeviceToDevice);
 #else
-        memcpy(dest, t->v, sz*sizeof(float));
+    memcpy(dest, t->v, sz*sizeof(float));
 #endif
-        dest += sz; // pointer arith
-    }
+    dest += sz; // pointer arith
+  }
 }
 
 // get a list of mat-mul items, not necessarily all of same shapes.
-// currently, batches the cases where the first arg is 2d and second arg is 1d.
-// the rest are applied as is.
-const void eval_matrix_multiply(
-        vector<int> &nids, const ComputationGraph &cg, vector<Tensor> *nfxs) {
+// currently, batches the cases where the first arg is 2d and second arg is 1d,
+// and the first arg is shared.
+// The rest are applied as is. 
+const void eval_2x1_matrix_multiply(
+    vector<int> &nids, const ComputationGraph &cg, vector<Tensor> *nfxs) {
 
-    vector<Tensor*> a1s;
-    vector<Tensor*> a2s;
+  vector<Tensor*> a1s;
+  vector<Tensor*> a2s;
+  for (auto nid : nids) {
+    //cout << "got nid:" << nid << endl;
+    const Node *node = cg.nodes[nid];
+    assert(node->args.size() == 2);
+    VariableIndex a1 = node->args[0];
+    a1s.push_back(&(*nfxs)[node->args[0]]);
+    a2s.push_back(&(*nfxs)[node->args[1]]);
+  }
+  // first arg is 2d: group by first arg, then combine the second args.
+  map<Tensor*,vector<Tensor*>> by_first_arg;
+  for (int i=0; i<a1s.size(); ++i) {
+    assert(a1s[i]->d.nd == 2);
+    assert(a2s[i]->d.nd == 1);
+    by_first_arg[a1s[i]].push_back(a2s[i]);
+  }
+  for (auto it = by_first_arg.begin(); it != by_first_arg.end(); ++it) {
+    Tensor *W = it->first;
+    vector<Tensor*> &vs = it->second;
+
+    AlignedMemoryPool *mempool = W->device->pools[(int)DeviceMempool::FXS];
+    const size_t allocator_state = mempool->used;
+    Tensor V;
+    combine_tensors(vs, &V);
+    V.d = Dim({vs[0]->d.rows(), (unsigned)vs.size()});
+    const vector<const Tensor*> xs { W, &V };
+
+    // allocate a matrix for the result
+    Tensor result;
+    result.d = Dim({W->d.rows(), (unsigned)vs.size()});
+    result.v = static_cast<float*>(mempool->allocate(result.d.size() * sizeof(float)));
+    result.device = W->device;
+
+    // apply the forward op
+    cg.nodes[nids[0]]->forward(xs, result);
+
+    // distribute the result tensor (copy) back to where the results are expected
+    unsigned offset = 0;
     for (auto nid : nids) {
-        //cout << "got nid:" << nid << endl;
-        const Node *node = cg.nodes[nid];
-        assert(node->args.size() == 2);
-        VariableIndex a1 = node->args[0];
-        a1s.push_back(&(*nfxs)[node->args[0]]);
-        a2s.push_back(&(*nfxs)[node->args[1]]);
-    }
-    vector<vector<int>> by_type(4); // (2,1), others
-    for (int i=0; i < a1s.size(); ++i) {
-        if        (a1s[i]->d.nd == 1 && a2s[i]->d.nd == 1) {
-            by_type[1].push_back(i);
-        } else if (a1s[i]->d.nd == 2 && a2s[i]->d.nd == 1) {
-            by_type[0].push_back(i);
-        } else if (a1s[i]->d.nd == 1 && a2s[i]->d.nd == 2) {
-            by_type[1].push_back(i);
-        } else {
-            by_type[1].push_back(i);
-        }
-    }
-    // first arg is 2d: group by first arg, then combine the second args.
-    map<Tensor*,vector<Tensor*>> by_first_arg;
-    for (auto i : by_type[0]) {
-        by_first_arg[a1s[i]].push_back(a2s[i]);
-    }
-    for (auto it = by_first_arg.begin(); it != by_first_arg.end(); ++it) {
-        Tensor *W = it->first;
-        vector<Tensor*> &vs = it->second;
-
-        AlignedMemoryPool *mempool = W->device->pools[(int)DeviceMempool::FXS];
-        const size_t allocator_state = mempool->used;
-        Tensor V;
-        combine_tensors(vs, &V);
-        V.d = Dim({vs[0]->d.rows(), (unsigned)vs.size()});
-        const vector<const Tensor*> xs { W, &V };
-        
-        // allocate a matrix for the result
-        Tensor result;
-        result.d = Dim({W->d.rows(), (unsigned)vs.size()});
-        result.v = static_cast<float*>(mempool->allocate(result.d.size() * sizeof(float)));
-        result.device = W->device;
-
-        // apply the forward op
-        cg.nodes[nids[0]]->forward(xs, result);
-
-        // distribute the result tensor (copy) back to where the results are expected
-        unsigned offset = 0;
-        for (auto nid : nids) {
-            const Node *node = cg.nodes[nid];
-            Tensor *a1 = &(*nfxs)[node->args[0]];
-            Tensor *a2 = &(*nfxs)[node->args[1]];
-            Tensor *out = &(*nfxs)[nid];
-            assert(out->d.size() == a1->d.rows());
-            //cout << "a1 dims:" << a1->d << endl;
-            //cout << "a2 dims:" << a2->d << endl;
-            // need to write on the node!
-            if (a1 == W) {
-                //cout << "nid:" << nid << " offset:" << offset << endl;
-                //for (int i = 0; i < 5; ++i) { cout << " " << *(result.v+offset+i) ; }
-                //cout << endl;
+      const Node *node = cg.nodes[nid];
+      Tensor *a1 = &(*nfxs)[node->args[0]];
+      Tensor *a2 = &(*nfxs)[node->args[1]];
+      Tensor *out = &(*nfxs)[nid];
+      assert(out->d.size() == a1->d.rows());
+      // need to write on the node!
+      if (a1 == W) {
 #if HAVE_CUDA
-                cudaMemcpyAsync(a2->v, result.v+offset, a1->d.rows()*sizeof(float), cudaMemcpyDeviceToDevice);
+        cudaMemcpyAsync(a2->v, result.v+offset, a1->d.rows()*sizeof(float), cudaMemcpyDeviceToDevice);
 #else
-                //cout << "memcpy:" << out->d.size() << endl;
-                memcpy(out->v, result.v+offset, out->d.size()*sizeof(float));
+        memcpy(out->v, result.v+offset, out->d.size()*sizeof(float));
 #endif
-                offset += out->d.size();
-            }
-        }
-        // deallocte the temp memory
-        mempool->used = allocator_state;
+        offset += out->d.size();
+      }
     }
-    // if first arg is not 2d, just do the usual
-    for (auto i : by_type[1]) {
-        auto nid = nids[i];
-        //cout << "reg, nid:" << nid << endl;
-        do_node(0, (VariableIndex)nid, cg.nodes[nid], nfxs, 0);
+    // deallocte the temp memory
+    mempool->used = allocator_state;
+  }
 
-    }
 }
 
 const void eval_ewise_unaries_in_bulk(
-        vector<int> &nids, const ComputationGraph &cg, vector<Tensor> *nfxs) {
+    vector<int> &nids, const ComputationGraph &cg, vector<Tensor> *nfxs) {
 
-    if (nids.size() > 10) {
-        vector<Tensor*> args;
-        for (auto nid : nids) {
-            const Node* node = cg.nodes[nid];
-            assert(node->args.size() == 1);
-            VariableIndex arg = node->args[0];
-            args.push_back(&(*nfxs)[arg]);
-        }
-        const Node* first_node = cg.nodes[nids[0]];
-        // allocate temp memory for the args and copy args
-        AlignedMemoryPool *mempool = args[0]->device->pools[(int)DeviceMempool::FXS];
-        const size_t allocator_state = mempool->used;
-        Tensor t;
-        combine_tensors(args, &t);
-        const vector<const Tensor*> xs { &t };
-        // apply the (first) node on the bulk tensor.
-        Tensor *fxs = &(*nfxs)[nids[0]];
-        Dim orig = fxs->d;
-        fxs->d = t.d;
-        first_node->forward(xs, *fxs);
-        fxs->d = orig;
-        // deallocte the temp memory
-        mempool->used = allocator_state;
-    } else { // just apply each of them individually
-        for (auto nid : nids) {
-            do_node(0, (VariableIndex)nid, cg.nodes[nid], nfxs, 0);
-        }
+  if (nids.size() > 10) {
+    vector<Tensor*> args;
+    for (auto nid : nids) {
+      const Node* node = cg.nodes[nid];
+      assert(node->args.size() == 1);
+      VariableIndex arg = node->args[0];
+      args.push_back(&(*nfxs)[arg]);
     }
+    const Node* first_node = cg.nodes[nids[0]];
+    // allocate temp memory for the args and copy args
+    AlignedMemoryPool *mempool = args[0]->device->pools[(int)DeviceMempool::FXS];
+    const size_t allocator_state = mempool->used;
+    Tensor t;
+    combine_tensors(args, &t);
+    const vector<const Tensor*> xs { &t };
+    // apply the (first) node on the bulk tensor.
+    Tensor *fxs = &(*nfxs)[nids[0]];
+    Dim orig = fxs->d;
+    fxs->d = t.d;
+    first_node->forward(xs, *fxs);
+    fxs->d = orig;
+    // deallocte the temp memory
+    mempool->used = allocator_state;
+  } else { // just apply each of them individually
+    for (auto nid : nids) {
+      do_node(0, (VariableIndex)nid, cg.nodes[nid], nfxs, 0);
+    }
+  }
 }
 
 void ExperimentalExecutionEngine::compute_depths(VariableIndex upto) {
@@ -198,14 +176,14 @@ void ExperimentalExecutionEngine::compute_depths(VariableIndex upto) {
   int max_depth=0;
   std::fill(depths.begin()+already_evaluated, depths.begin()+upto+1, 0);
   for (int j=already_evaluated; j<upto+1; ++j) {
-      const Node* node = cg.nodes[j];
-      for (VariableIndex arg : node->args) {
-          parents[arg].push_back(j);
-          if (depths[arg]+1 > depths[j]) {
-              depths[j] = depths[arg]+1;
-              if (depths[j] > max_depth) { max_depth = depths[j]; }
-          }
+    const Node* node = cg.nodes[j];
+    for (VariableIndex arg : node->args) {
+      parents[arg].push_back(j);
+      if (depths[arg]+1 > depths[j]) {
+        depths[j] = depths[arg]+1;
+        if (depths[j] > max_depth) { max_depth = depths[j]; }
       }
+    }
   }
 
   // by now, depthsj[j] is the earliest time that j can be evaluated (afer all its depends on).
@@ -215,13 +193,13 @@ void ExperimentalExecutionEngine::compute_depths(VariableIndex upto) {
   depths2.resize(upto+1);
   depths2[upto] = max_depth + 1;
   for (int j=upto; j>=already_evaluated;--j) {
-      int min_of_parents = max_depth + 1; // to be on the safe side
-      for (auto parent : parents[j]) {
-          if (depths2[parent] < min_of_parents) { min_of_parents = depths2[parent]; }
-      }
-      depths2[j] = min_of_parents - 1;
-      //assert(depths2[j] >= depths[j]);
-      //assert(depths2[j] <= max_depth);
+    int min_of_parents = max_depth + 1; // to be on the safe side
+    for (auto parent : parents[j]) {
+      if (depths2[parent] < min_of_parents) { min_of_parents = depths2[parent]; }
+    }
+    depths2[j] = min_of_parents - 1;
+    //assert(depths2[j] >= depths[j]);
+    //assert(depths2[j] <= max_depth);
   }
 
   // group by depth, using depth2.
@@ -229,24 +207,24 @@ void ExperimentalExecutionEngine::compute_depths(VariableIndex upto) {
   //       to maximize the number of "slow ops" that happen in parallel?
   by_depth.resize(max_depth+2);
   for (int j=already_evaluated; j<depths2.size(); ++j) {
-      by_depth[depths2[j]].push_back(j);
+    by_depth[depths2[j]].push_back(j);
   }
 }
 
 // print the depths structure, for debug etc.
 void ExperimentalExecutionEngine::_print_nodes_by_depth() const {
-    for (int d=0; d<by_depth.size(); ++d) {
-        cout << "depths " << d << " : " << by_depth[d].size() << endl;;
-        for (int nid : by_depth[d]) {
-            const Node* node = cg.nodes[nid];
-            vector<string> a;
-            for (auto arg : node->args) { a.push_back(string("v") + to_string(arg)); }
-            cout <<  "  " << nid << " |||  " << cg.nodes[nid]->as_string(a) << " ||| " << cg.nodes[nid]->dim << " ||| " ;
-            for (auto a_ : a) { cout << " " << a_ ; }
-            cout << endl;
-        }
-        cout << endl;
+  for (int d=0; d<by_depth.size(); ++d) {
+    cout << "depths " << d << " : " << by_depth[d].size() << endl;;
+    for (int nid : by_depth[d]) {
+      const Node* node = cg.nodes[nid];
+      vector<string> a;
+      for (auto arg : node->args) { a.push_back(string("v") + to_string(arg)); }
+      cout <<  "  " << nid << " |||  " << cg.nodes[nid]->as_string(a) << " ||| " << cg.nodes[nid]->dim << " ||| " ;
+      for (auto a_ : a) { cout << " " << a_ ; }
+      cout << endl;
     }
+    cout << endl;
+  }
 }
 
 const Tensor& ExperimentalExecutionEngine::incremental_forward(VariableIndex upto) {
@@ -272,15 +250,17 @@ const Tensor& ExperimentalExecutionEngine::incremental_forward(VariableIndex upt
   // TODO have allocation consider later threading, by giving the "slow" nodes
   //      memory on different pages? or otherwise order memory according to threading?
   for (int d=0; d<by_depth.size(); ++d) {
-    vector<BulkOpInfo> matrixMult;
-    vector<BulkOpInfo> ewiseUnary;
-    vector<BulkOpInfo> other;
+    // group nodes by op.
     map<NodeType,vector<int>> by_type;
     for (int nid : by_depth[d]) {
       if (nid < already_evaluated) continue;
       const Node* node = cg.nodes[nid];
       by_type[node->type_id()].push_back(nid);
     }
+
+    vector<BulkOpInfo> matrixMult;
+    vector<BulkOpInfo> ewiseUnary;
+    vector<BulkOpInfo> other;
     for (auto it = by_type.begin(); it != by_type.end(); ++it) {
       // after this loop, the output of each node "type" will be contiguous
       // in memory. This means that we can *produce* them all in a single op,
@@ -289,10 +269,15 @@ const Tensor& ExperimentalExecutionEngine::incremental_forward(VariableIndex upt
       // the op.  Ideally, args will be arranged to be in the correct locations beforehand.
       // Also note that currently the types do not have fine enough distinction
       // for working for MatrixMultiply and AffineTransform.
+      //
+      // TODO: there is currently some allocation also inside the unary and mat-mul
+      //       operations. would be nice to move all allocations back here, to support
+      //       multi-threaded invocation without needing to sync the allocator.
+      //       note: temp storage needs to be allocated last, so it can be freed.
       const auto type = it->first;
-      const auto nids = it->secondl
+      const auto nids = it->second;
       unsigned total_dsize = 0;
-      for (auto nid : it->second) {
+      for (auto nid : nids) {
         const Node* node = cg.nodes[nid];
         nfxs[nid].d = node->dim;
         // Get the device
@@ -310,12 +295,12 @@ const Tensor& ExperimentalExecutionEngine::incremental_forward(VariableIndex upt
         node->aux_mem = aux_mem;
       }
       // allocate in bulk to not have alignment between each element.
-      float *base = static_cast<float*>(nfxs[it->second[0]].device->pools[(int)DeviceMempool::FXS]->allocate(total_dsize*sizeof(float)));
+      float *base = static_cast<float*>(nfxs[nids[0]].device->pools[(int)DeviceMempool::FXS]->allocate(total_dsize*sizeof(float)));
       if (base == nullptr) 
         throw std::runtime_error("out of memory");
       // now set the mem for each node
       unsigned offset = 0;
-      for (auto nid : it->second) {
+      for (auto nid : nids) {
         const Node* node = cg.nodes[nid];
         // set the mem location
         nfxs[nid].v = base + offset; // already *sizeof(float) b.c pointer arith
@@ -326,15 +311,14 @@ const Tensor& ExperimentalExecutionEngine::incremental_forward(VariableIndex upt
     for (auto it = by_type.begin(); it != by_type.end(); ++it) {
       if (ewise_unary_nodes.find(it->first) != ewise_unary_nodes.end()) {
         eval_ewise_unaries_in_bulk(it->second, cg, &nfxs);
-      } else if (it->first == NodeType::MatrixMultiply && it->second.size() > 5) {
-        eval_matrix_multiply(it->second, cg, &nfxs);
+      } else if (it->first == NodeType::MatrixMultiply2x1 && it->second.size() > 5) {
+        eval_2x1_matrix_multiply(it->second, cg, &nfxs);
       } else {
         for (auto nid : it->second) {
           do_node(1, (VariableIndex)nid, cg.nodes[nid], &nfxs, 0);
         }
       }
     }
-
   }
   num_nodes_evaluated = upto; // or is it upto + 1?
 
