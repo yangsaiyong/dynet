@@ -8,6 +8,7 @@ set(dynet_library_SRCS
     dict.cc
     dim.cc
     exec.cc
+    exec2.cc
     expr.cc
     fast-lstm.cc
     globals.cc
@@ -78,6 +79,9 @@ set(dynet_library_HDRS
     nodes-macros.h
     weight-decay.h
     io-macros.h
+    ctpl_stl.h
+    countdownlatch.h
+    node-types.h
 )
 
 file(GLOB TEST_SRCS RELATIVE ${CMAKE_CURRENT_SOURCE_DIR} tests/*.cc)

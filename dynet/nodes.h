@@ -4,6 +4,7 @@
 #include "dynet/dynet.h"
 #include "dynet/devices.h"
 #include "dynet/nodes-macros.h"
+#include "dynet/node-types.h"
 
 // See nodes-macros.h for more details about DYNET_NODE_DEFINE_DEV_IMPL().
 
@@ -181,6 +182,7 @@ struct ConstantMinusX : public Node {
 struct Sqrt : public Node {
   explicit Sqrt(const std::initializer_list<VariableIndex>& a) : Node(a) {}
   virtual bool supports_multibatch() const override { return true; }
+  virtual NodeType type_id() const override { return NodeType::Sqrt; }
   DYNET_NODE_DEFINE_DEV_IMPL()
 };
 
@@ -188,6 +190,7 @@ struct Sqrt : public Node {
 struct Erf : public Node {
   explicit Erf(const std::initializer_list<VariableIndex>& a) : Node(a) {}
   virtual bool supports_multibatch() const override { return true; }
+  virtual NodeType type_id() const override { return NodeType::Erf; }
   DYNET_NODE_DEFINE_DEV_IMPL()
 };
 
@@ -195,6 +198,7 @@ struct Erf : public Node {
 struct Tanh : public Node {
   explicit Tanh(const std::initializer_list<VariableIndex>& a) : Node(a) {}
   virtual bool supports_multibatch() const override { return true; }
+  virtual NodeType type_id() const override { return NodeType::Tanh; }
   DYNET_NODE_DEFINE_DEV_IMPL()
 };
 
@@ -216,6 +220,7 @@ struct Cube : public Node {
 struct Exp : public Node {
   explicit Exp(const std::initializer_list<VariableIndex>& a) : Node(a) {}
   virtual bool supports_multibatch() const override { return true; }
+  virtual NodeType type_id() const override { return NodeType::Exp; }
   DYNET_NODE_DEFINE_DEV_IMPL()
 };
 
@@ -223,6 +228,7 @@ struct Exp : public Node {
 struct LogGamma : public Node {
   explicit LogGamma(const std::initializer_list<VariableIndex>& a) : Node(a) {}
   virtual bool supports_multibatch() const override { return true; }
+  virtual NodeType type_id() const override { return NodeType::LogGamma; }
   DYNET_NODE_DEFINE_DEV_IMPL()
 };
 
@@ -230,6 +236,7 @@ struct LogGamma : public Node {
 struct Log : public Node {
   explicit Log(const std::initializer_list<VariableIndex>& a) : Node(a) {}
   virtual bool supports_multibatch() const override { return true; }
+  virtual NodeType type_id() const override { return NodeType::Log; }
   DYNET_NODE_DEFINE_DEV_IMPL()
 };
 
@@ -304,8 +311,25 @@ struct MaxPooling1D : public Node {
 
 // y = x_1 * x_2
 struct MatrixMultiply : public Node {
-  explicit MatrixMultiply(const std::initializer_list<VariableIndex>& a) : Node(a) {}
+  explicit MatrixMultiply(const std::initializer_list<VariableIndex>& a) : Node(a), _slow(false) { }
   virtual bool supports_multibatch() const override { return true; }
+  virtual bool slow() const override { return _slow; }
+  virtual void set_slowness(const std::vector<Dim> &xs) override { 
+      assert(xs.size() == 2);
+      const int T = 100*100; // TODO tune this value? or the fomula in general.
+
+      if (xs[0].nd==2 && xs[1].nd==1) _type = NodeType::MatrixMultiply2x1;
+      else if (xs[0].nd==1 && xs[1].nd==1) _type = NodeType::MatrixMultiply1x1;
+      else if (xs[0].nd==1 && xs[1].nd==2) _type = NodeType::MatrixMultiply1x2;
+      else if (xs[0].nd==2 && xs[1].nd==2) _type = NodeType::MatrixMultiply2x2;
+
+      for (auto x : xs) {
+         if (x.size() > T) { _slow = true; return; }
+      }
+  }
+  virtual NodeType type_id() const override { return _type; }
+  bool _slow; // = false;
+  NodeType _type;
   DYNET_NODE_DEFINE_DEV_IMPL()
 };
 
@@ -313,6 +337,7 @@ struct MatrixMultiply : public Node {
 struct CwiseMultiply : public Node {
   explicit CwiseMultiply(const std::initializer_list<VariableIndex>& a) : Node(a) {}
   virtual bool supports_multibatch() const override { return true; }
+  virtual NodeType type_id() const override { return NodeType::CwiseMultiply; }
   DYNET_NODE_DEFINE_DEV_IMPL()
 };
 
@@ -320,13 +345,23 @@ struct CwiseMultiply : public Node {
 struct CwiseQuotient : public Node {
   explicit CwiseQuotient(const std::initializer_list<VariableIndex>& a) : Node(a) {}
   virtual bool supports_multibatch() const override { return true; }
+  virtual NodeType type_id() const override { return NodeType::CwiseQuotient; }
   DYNET_NODE_DEFINE_DEV_IMPL()
 };
 
 // y = x_1 \sum_{i=2, 4 ...} A_i * x_{i+1}
 struct AffineTransform : public Node {
-  template <typename T> explicit AffineTransform(const T& a) : Node(a) {}
+  template <typename T> explicit AffineTransform(const T& a) : Node(a), _slow(false) {}
   virtual bool supports_multibatch() const override { return true; }
+  virtual bool slow() const override { return _slow; }
+  virtual void set_slowness(const std::vector<Dim> &xs) override { 
+      const int T = 100*100; // TODO tune this value? or the fomula in general.
+      for (auto x : xs) {
+          if (x.size() > T) { _slow = true; return; }
+      }
+  }
+  bool _slow; // = false;
+  virtual NodeType type_id() const override { return NodeType::AffineTransform; }
   DYNET_NODE_DEFINE_DEV_IMPL()
   mutable float* dEdf_mem;
 };
@@ -335,6 +370,7 @@ struct AffineTransform : public Node {
 struct Negate : public Node {
   explicit Negate(const std::initializer_list<VariableIndex>& a) : Node(a) {}
   virtual bool supports_multibatch() const override { return true; } 
+  virtual NodeType type_id() const override { return NodeType::Negate; }
   DYNET_NODE_DEFINE_DEV_IMPL()
 };
 
@@ -342,6 +378,7 @@ struct Negate : public Node {
 struct Rectify : public Node {
   explicit Rectify(const std::initializer_list<VariableIndex>& a) : Node(a) {}
   virtual bool supports_multibatch() const override { return true; }
+  virtual NodeType type_id() const override { return NodeType::Rectify; }
   DYNET_NODE_DEFINE_DEV_IMPL()
 };
 
@@ -434,6 +471,7 @@ struct L1Distance : public Node {
 struct LogisticSigmoid : public Node {
   explicit LogisticSigmoid(const std::initializer_list<VariableIndex>& a) : Node(a) {}
   virtual bool supports_multibatch() const override { return true; }
+  virtual NodeType type_id() const override { return NodeType::Sigmoid; }
   DYNET_NODE_DEFINE_DEV_IMPL()
 };
 
@@ -473,6 +511,7 @@ struct PickNegLogSoftmax : public Node {
   explicit PickNegLogSoftmax(const std::initializer_list<VariableIndex>& a, const std::vector<unsigned>* pv) : Node(a), val(), pval(), vals(), pvals(pv) {}
   DYNET_NODE_DEFINE_DEV_IMPL()
   virtual bool supports_multibatch() const override { return true; }
+  virtual bool slow() const override { return true; }
   size_t aux_storage_size() const override;
   unsigned val;
   const unsigned* pval;

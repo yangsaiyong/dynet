@@ -8,6 +8,7 @@
 #include <utility>
 
 #include <boost/serialization/strong_typedef.hpp>
+#include "dynet/node-types.h"
 
 #include "dynet/init.h"
 #include "dynet/aligned-mem-pool.h"
@@ -176,6 +177,9 @@ struct Node {
   // if true, forward and backward will be called once with a multi-batch tensor.
   // if false, forward and backward will be called multiple times for each item.
   virtual bool supports_multibatch() const { return false; }
+  virtual bool slow() const { return false; }
+  virtual void set_slowness(const std::vector<Dim>& xs) {};
+  virtual NodeType type_id() const { return NodeType::UNK; }
 
   // perform the forward/backward passes in one or multiple calls
   virtual void forward(const std::vector<const Tensor*>& xs,

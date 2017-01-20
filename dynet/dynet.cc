@@ -86,7 +86,8 @@ void Node::backward(const std::vector<const Tensor*>& xs,
 }
 
 ComputationGraph::ComputationGraph() :
-  ee(new SimpleExecutionEngine(*this)) {
+  //ee(new SimpleExecutionEngine(*this)) {
+  ee((exp_exec == 1) ? new ExperimentalExecutionEngine(*this) : new SimpleExecutionEngine(*this)) {
   ++n_hgs;
   if (n_hgs > 1) {
     cerr << "Memory allocator assumes only a single ComputationGraph at a time.\n";
@@ -277,6 +278,7 @@ void ComputationGraph::set_dim_for_new_node(const VariableIndex& i) {
     ++ai;
   }
   node->dim = node->dim_forward(xds);
+  node->set_slowness(xds);
 }
 
 const Tensor& ComputationGraph::incremental_forward(const expr::Expression& last) { return ee->incremental_forward(last.i); }

@@ -2,6 +2,7 @@
 #define DYNET_EXEC_H
 
 #include "dynet/dynet.h"
+#include "dynet/ctpl_stl.h"
 
 namespace dynet {
 
@@ -38,6 +39,34 @@ class SimpleExecutionEngine : public ExecutionEngine {
   std::vector<Tensor> nfxs;
   std::vector<Tensor> ndEdfs;
   VariableIndex num_nodes_evaluated;
+};
+
+class ExperimentalExecutionEngine : public SimpleExecutionEngine {
+ public:
+  explicit ExperimentalExecutionEngine(const ComputationGraph& cg) : SimpleExecutionEngine(cg), pool(ncpu) {}
+  void invalidate() override;
+  void invalidate(unsigned i) override;
+  const Tensor& forward() override;
+  const Tensor& forward(VariableIndex i) override;
+  const Tensor& incremental_forward() override;  // if you want to add nodes and evaluate just the new parts
+  const Tensor& incremental_forward(VariableIndex i) override;
+  const Tensor& get_value(VariableIndex i) override;
+  void backward() override;
+  void backward(VariableIndex i) override;
+ private:
+  std::vector<Tensor> nfxs;
+  std::vector<Tensor> ndEdfs;
+  VariableIndex num_nodes_evaluated;
+  ctpl::thread_pool pool;
+
+  std::vector<int> depths;
+  std::vector<int> depths2;
+  std::vector<std::vector<int>> by_depth;
+  std::vector<std::vector<int>> parents;
+
+  void compute_depths(VariableIndex upto);
+
+  void _print_nodes_by_depth() const;
 };
 
 } // namespace dynet
