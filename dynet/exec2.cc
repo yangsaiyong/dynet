@@ -291,7 +291,7 @@ const Tensor& ExperimentalExecutionEngine::incremental_forward(VariableIndex upt
       // for working for MatrixMultiply and AffineTransform.
       const auto type = it->first;
       const auto nids = it->secondl
-        unsigned total_dsize = 0;
+      unsigned total_dsize = 0;
       for (auto nid : it->second) {
         const Node* node = cg.nodes[nid];
         nfxs[nid].d = node->dim;
@@ -336,68 +336,9 @@ const Tensor& ExperimentalExecutionEngine::incremental_forward(VariableIndex upt
     }
 
   }
-    num_nodes_evaluated = upto; // or is it upto + 1?
+  num_nodes_evaluated = upto; // or is it upto + 1?
 
-    return nfxs[upto];
-    /*
-        for (unsigned nid = already_evaluated; nid <= upto; ++nid) {
-        const Node* node = cg.nodes[nid];
-        do_node(1, (VariableIndex)nid, node, &nfxs, 0);
-        }*/
-
-    // TODO this is a mess now
-    // memory is allocated, execute graph (possibly in threads)
-    for (int d=0; d<by_depth.size(); ++d) {
-        map<NodeType,vector<int>> by_type;
-        for (int nid : by_depth[d]) {
-            if (nid < already_evaluated) continue;
-            const Node* node = cg.nodes[nid];
-            by_type[node->type_id()].push_back(nid);
-        }
-        for (auto it = by_type.begin(); it != by_type.end(); ++it) {
-            vector<int> slow_ops;
-            int first_slow_op = -1;
-            for (int nid : by_depth[d]) {
-                if (nid < already_evaluated) continue;
-                if (cg.nodes[nid]->slow()) slow_ops.push_back(nid);
-            }
-            if (slow_ops.size() > 0) {
-                first_slow_op = slow_ops.back();
-                slow_ops.pop_back();
-            }
-            int n_thread_ops = slow_ops.size();
-            //if (slows < 2) slows = 0;
-            //cout << slow_ops.size() << "/" << by_depth[d].size() << endl;
-            if (ncpu <= 1) n_thread_ops = 0;
-            //slows = 0;
-            clatch::countdownlatch cl(n_thread_ops);
-            // slow nodes in threads
-            for (int nid : slow_ops) {
-                const Node* node = cg.nodes[nid];
-                if (n_thread_ops > 0)
-                    pool.push(do_node, (VariableIndex)nid, node, &nfxs, &cl);
-                else
-                    do_node(1, (VariableIndex)nid, node, &nfxs, 0);
-            }
-            // first slow op runs in the main thread (concurrently with other slow ops).
-            if (first_slow_op > -1) {
-                const Node* node = cg.nodes[first_slow_op];
-                do_node(1, (VariableIndex)first_slow_op, node, &nfxs, 0);
-            }
-            // non-slow nodes in main thread (concurrently with the other slow ops).
-            for (int nid : by_depth[d]) {
-                if (nid < already_evaluated) continue;
-                const Node* node = cg.nodes[nid];
-                if (!node->slow()) {
-                    do_node(1, (VariableIndex)nid, node, &nfxs, 0);
-                }
-            }
-            if (n_thread_ops > 0) { // if needed, wait for the threads to finish.
-                cl.await();
-            }
-        }
-    }
-    return nfxs[upto];
+  return nfxs[upto];
 }
 
 
