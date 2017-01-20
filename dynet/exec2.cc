@@ -114,6 +114,16 @@ const void eval_2x1_matrix_multiply(
   vector<Tensor*> a2s;
   const Node *fnode = cg.nodes[nids[0]];
   A1 = &(*nfxs)[fnode->args[0]];
+
+  // is this guard needed? I think the memcopy is pretty harmless,
+  // might as well just run the batching anyways.
+  if (nids.size() < 10 && A1->d.size() < 1000) {
+    for (auto nid : nids) {
+      do_node(1, (VariableIndex)nid, cg.nodes[nid], nfxs, 0);
+    }
+    return;
+  }
+
   for (auto nid : nids) {
     const Node *node = cg.nodes[nid];
     assert(fnode->args[0] == node->args[0]);
@@ -127,36 +137,16 @@ const void eval_2x1_matrix_multiply(
   A2.d = Dim({a2s[0]->d.rows(), (unsigned)a2s.size()});
   const vector<const Tensor*> xs { A1, &A2 };
 
-  // allocate a matrix for the result
+  // point result tensor to pre-allocated memory were
+  // resulting tensors are expected.
   Tensor result;
   result.d = Dim({A1->d.rows(), (unsigned)a2s.size()});
-  //result.v = static_cast<float*>(mempool->allocate(result.d.size() * sizeof(float)));
-  result.v = (*nfxs)[nids[0]].v;
   result.device = A1->device;
+  result.v = (*nfxs)[nids[0]].v;
 
   // apply the forward op
   cg.nodes[nids[0]]->forward(xs, result);
 
-  // distribute the result tensor (copy) back to where the results are expected
-  /*
-     unsigned offset = 0;
-     for (auto nid : nids) {
-     const Node *node = cg.nodes[nid];
-     Tensor *a1 = &(*nfxs)[node->args[0]];
-     Tensor *a2 = &(*nfxs)[node->args[1]];
-     Tensor *out = &(*nfxs)[nid];
-     assert(out->d.size() == a1->d.rows());
-  // need to write on the node!
-  if (a1 == W) {
-#if HAVE_CUDA
-cudaMemcpyAsync(a2->v, result.v+offset, a1->d.rows()*sizeof(float), cudaMemcpyDeviceToDevice);
-#else
-memcpy(out->v, result.v+offset, out->d.size()*sizeof(float));
-#endif
-offset += out->d.size();
-}
-}
-   */
   // deallocte the temp memory
   mempool->used = allocator_state;
 } 
@@ -316,7 +306,7 @@ const Tensor& ExperimentalExecutionEngine::incremental_forward(VariableIndex upt
       _allocate_nids(it->second, cg, nfxs);
     }
       
-    // apply nodes for current depth
+    // apply nodes for current depth.
     for (auto it = by_type.begin(); it != by_type.end(); ++it) {
       if (ewise_unary_nodes.find(it->first) != ewise_unary_nodes.end()) {
         eval_ewise_unaries_in_bulk(it->second, cg, &nfxs);
@@ -328,14 +318,9 @@ const Tensor& ExperimentalExecutionEngine::incremental_forward(VariableIndex upt
         }
       }
     }
+    // apply the matrix multiplications.
     for (auto it = matmuls_by_first_arg.begin(); it != matmuls_by_first_arg.end(); ++it) {
-      if (it->second.size() > 5)
         eval_2x1_matrix_multiply(it->second, cg, &nfxs);
-      else {
-        for (auto nid : it->second) {
-          do_node(1, (VariableIndex)nid, cg.nodes[nid], &nfxs, 0);
-        }
-      }
     }
   }
   num_nodes_evaluated = upto; // or is it upto + 1?
