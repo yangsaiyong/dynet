@@ -247,7 +247,7 @@ void ExperimentalExecutionEngine::_print_nodes_by_depth() const {
 const Tensor& ExperimentalExecutionEngine::incremental_forward(VariableIndex upto) {
   assert(upto < cg.nodes.size());
   // don't do any work if we don't need to.
-  if (upto < num_nodes_evaluated) { return nfxs[upto]; }
+  if (upto <= num_nodes_evaluated) { return nfxs[upto]; }
 
   const int already_evaluated = num_nodes_evaluated;
 
@@ -258,7 +258,7 @@ const Tensor& ExperimentalExecutionEngine::incremental_forward(VariableIndex upt
   }
 
   compute_depths(upto);
-  
+
   if (false) _print_nodes_by_depth();
 
   nfxs.resize(upto + 1);
@@ -269,6 +269,7 @@ const Tensor& ExperimentalExecutionEngine::incremental_forward(VariableIndex upt
   for (int d=0; d<by_depth.size(); ++d) {
     // group nodes by op.
     map<NodeType,vector<int>> by_type;
+    map<VariableIndex,vector<int>> matmuls_by_first_arg;
     for (int nid : by_depth[d]) {
       if (nid < already_evaluated) continue;
       const Node* node = cg.nodes[nid];
@@ -276,14 +277,13 @@ const Tensor& ExperimentalExecutionEngine::incremental_forward(VariableIndex upt
     }
     // group matrix 2x1 multiplication by first arg
     auto nids = by_type[NodeType::MatrixMultiply2x1];
-    map<VariableIndex,vector<int>> matmuls_by_first_arg;
     for (auto nid : nids) {
       matmuls_by_first_arg[cg.nodes[nid]->args[0]].push_back(nid);
     }
 
-    vector<BulkOpInfo> matrixMult;
-    vector<BulkOpInfo> ewiseUnary;
-    vector<BulkOpInfo> other;
+    //vector<BulkOpInfo> matrixMult;
+    //vector<BulkOpInfo> ewiseUnary;
+    //vector<BulkOpInfo> other;
     for (auto it = by_type.begin(); it != by_type.end(); ++it) {
       // after this loop, the output of each node "type" will be contiguous
       // in memory. This means that we can *produce* them all in a single op,
@@ -305,7 +305,7 @@ const Tensor& ExperimentalExecutionEngine::incremental_forward(VariableIndex upt
     for (auto it = matmuls_by_first_arg.begin(); it != matmuls_by_first_arg.end(); ++it) {
       _allocate_nids(it->second, cg, nfxs);
     }
-      
+
     // apply nodes for current depth.
     for (auto it = by_type.begin(); it != by_type.end(); ++it) {
       if (ewise_unary_nodes.find(it->first) != ewise_unary_nodes.end()) {
@@ -320,8 +320,9 @@ const Tensor& ExperimentalExecutionEngine::incremental_forward(VariableIndex upt
     }
     // apply the matrix multiplications.
     for (auto it = matmuls_by_first_arg.begin(); it != matmuls_by_first_arg.end(); ++it) {
-        eval_2x1_matrix_multiply(it->second, cg, &nfxs);
+      eval_2x1_matrix_multiply(it->second, cg, &nfxs);
     }
+
   }
   num_nodes_evaluated = upto; // or is it upto + 1?
 
