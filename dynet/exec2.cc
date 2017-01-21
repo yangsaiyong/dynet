@@ -168,9 +168,6 @@ const void eval_bulk_regular(
 const void eval_ewise_binaries_in_bulk(
     vector<int> &nids, const ComputationGraph &cg, vector<Tensor> *nfxs) {
 
-  cout << "ewise binary " << nids.size() << endl;
-  Timer timer("ewise binary");
-
     vector<Tensor*> a1s;
     vector<Tensor*> a2s;
     unsigned total_result_size = 0;
@@ -246,6 +243,10 @@ void ExperimentalExecutionEngine::compute_depths(VariableIndex upto) {
   depths.resize(upto+1);
   parents.resize(upto+1);
   int max_depth=0;
+
+  matmuls_per_depth.resize(upto+1,0);
+  nodes_per_depth.resize(upto+1,0);
+
   std::fill(depths.begin()+already_evaluated, depths.begin()+upto+1, 0);
   for (int j=already_evaluated; j<upto+1; ++j) {
     const Node* node = cg.nodes[j];
@@ -256,12 +257,18 @@ void ExperimentalExecutionEngine::compute_depths(VariableIndex upto) {
         if (depths[j] > max_depth) { max_depth = depths[j]; }
       }
     }
+    const int d = depths[j];
+    if (node->type_id() == NodeType::MatrixMultiply2x1) { matmuls_per_depth[d] += 1; }
+    nodes_per_depth[d] += 1;
   }
+
+  // how many matmuls I have at this depth?
 
   // by now, depthsj[j] is the earliest time that j can be evaluated (afer all its depends on).
   // compute depths2[j], which is the latest tiem that j can be evaluated (just before the 
   // earliest who depend on it).
   //vector<int> depths2(upto+1);
+
   depths2.resize(upto+1);
   depths2[upto] = max_depth + 1;
   for (int j=upto; j>=already_evaluated;--j) {
@@ -269,9 +276,24 @@ void ExperimentalExecutionEngine::compute_depths(VariableIndex upto) {
     for (auto parent : parents[j]) {
       if (depths2[parent] < min_of_parents) { min_of_parents = depths2[parent]; }
     }
-    depths2[j] = min_of_parents - 1;
-    //assert(depths2[j] >= depths[j]);
-    //assert(depths2[j] <= max_depth);
+    // heuristic: if there are already many (?) matmul ops in the level,
+    //            don't move matmuls up.
+    // TODO:find better heuristic
+    //      TODO perhaps by considering the num of matmuls for a given arg
+    //           in the current depth.
+
+    // the huristic speeds small LSTM-LM batches, but slows down larger ones.
+    // do disable the hueristic, just use:
+    //     depths2[j] = min_of_parents - 1;
+    // and can also get rid of the matmuls_per_depths and nodes_per_depth tracking.
+    const bool heuristic = true;
+    const int npd = nodes_per_depth[depths[j]];
+    if (heuristic && cg.nodes[j]->type_id() == NodeType::MatrixMultiply2x1 &&
+        npd > 20 && matmuls_per_depth[depths[j]]*1.2 > npd ) { 
+        depths2[j] = depths[j];
+    } else {
+      depths2[j] = min_of_parents - 1;
+    }
   }
 
   // group by depth, using depth2.
@@ -280,6 +302,9 @@ void ExperimentalExecutionEngine::compute_depths(VariableIndex upto) {
   by_depth.resize(max_depth+2);
   for (int j=already_evaluated; j<depths2.size(); ++j) {
     by_depth[depths2[j]].push_back(j);
+  }
+  for (int j=already_evaluated; j<depths.size(); ++j) {
+  // by_depth[depths[j]].push_back(j);
   }
 }
 
@@ -310,6 +335,9 @@ const Tensor& ExperimentalExecutionEngine::incremental_forward(VariableIndex upt
   if (already_evaluated == 0) {
     for(Device* dev : dynet::devices)
       dev->pools[(int)DeviceMempool::FXS]->free();
+
+    std::fill(matmuls_per_depth.begin(), matmuls_per_depth.end(), 0);
+    std::fill(nodes_per_depth.begin(), nodes_per_depth.end(), 0);
   }
 
   compute_depths(upto);
@@ -368,8 +396,13 @@ const Tensor& ExperimentalExecutionEngine::incremental_forward(VariableIndex upt
         //eval_bulk_regular(it->second, cg, &nfxs);
       } else if (false && ewise_binary_nodes.find(it->first) != ewise_binary_nodes.end()) { // not efficient
         cout << "start binary" << endl;
+        { Timer t("batch");
         eval_ewise_binaries_in_bulk(it->second, cg, &nfxs);
+        }
+        {
+          Timer t("regulr");
         eval_bulk_regular(it->second, cg, &nfxs);
+        }
         cout << "end binary" << endl;
       } else if (it->first == NodeType::MatrixMultiply2x1) {
         continue; 
