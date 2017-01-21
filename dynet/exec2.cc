@@ -25,6 +25,7 @@ struct BulkOpInfo {
 };
 
 const set<NodeType> ewise_unary_nodes { NodeType::Tanh, NodeType::Rectify, NodeType::Sigmoid, NodeType::Erf, NodeType::Sqrt, NodeType::Exp, NodeType::LogGamma, NodeType::Log, NodeType::Negate };
+const set<NodeType> ewise_binary_nodes { NodeType::CwiseMultiply }; //, NodeType::CwiseQuotient, NodeType::Pow, NodeType::Min, NodeType::Max };
 
 // this can run in a different thread, given that the memory is initialized.
 void do_node(int id, VariableIndex node_id, const Node *node, std::vector<Tensor> *nfxs, clatch::countdownlatch *cl) {
@@ -110,6 +111,8 @@ const void combine_tensors(const vector<Tensor*> &ts, Tensor *tout) {
 const void eval_2x1_matrix_multiply(
     vector<int> &nids, const ComputationGraph &cg, vector<Tensor> *nfxs) {
 
+  //cout << "matmul:" << nids.size() << " autobatch" << endl;
+  //Timer t("matmul aub");
   Tensor* A1;
   vector<Tensor*> a2s;
   const Node *fnode = cg.nodes[nids[0]];
@@ -151,10 +154,59 @@ const void eval_2x1_matrix_multiply(
   mempool->used = allocator_state;
 } 
 
+const void eval_bulk_regular(
+    vector<int> &nids, const ComputationGraph &cg, vector<Tensor> *nfxs) {
+
+  //cout << "regbatch:" << nids.size() << " regular" << endl;
+  //Timer t("eval reg");
+
+    for (auto nid : nids) {
+      do_node(1, (VariableIndex)nid, cg.nodes[nid], nfxs, 0);
+    }
+}
+
+const void eval_ewise_binaries_in_bulk(
+    vector<int> &nids, const ComputationGraph &cg, vector<Tensor> *nfxs) {
+
+  cout << "ewise binary " << nids.size() << endl;
+  Timer timer("ewise binary");
+
+    vector<Tensor*> a1s;
+    vector<Tensor*> a2s;
+    unsigned total_result_size = 0;
+    for (auto nid : nids) {
+      total_result_size += (*nfxs)[nid].d.size();
+      const Node* node = cg.nodes[nid];
+      assert(node->args.size() == 2);
+      const VariableIndex a1 = node->args[0];
+      const VariableIndex a2 = node->args[1];
+      a1s.push_back(&(*nfxs)[a1]);
+      a2s.push_back(&(*nfxs)[a2]);
+    }
+    const Node* first_node = cg.nodes[nids[0]];
+    // allocate temp memory for the args and copy args
+    AlignedMemoryPool *mempool = a1s[0]->device->pools[(int)DeviceMempool::FXS];
+    const size_t allocator_state = mempool->used;
+    Tensor A1;
+    combine_tensors(a1s, &A1);
+    Tensor A2;
+    combine_tensors(a2s, &A2);
+    //cout << "A1 dim:" << A1.d << endl;
+    //cout << "A2 dim:" << A2.d << endl;
+    const vector<const Tensor*> xs { &A1, &A2 };
+    // apply the (first) node on the bulk tensor.
+    Tensor *fxs = &(*nfxs)[nids[0]];
+    Dim orig = fxs->d;
+    fxs->d = Dim({total_result_size});
+    first_node->forward(xs, *fxs);
+    fxs->d = orig;
+    // deallocte the temp memory
+    mempool->used = allocator_state;
+}
+
 const void eval_ewise_unaries_in_bulk(
     vector<int> &nids, const ComputationGraph &cg, vector<Tensor> *nfxs) {
 
-  if (nids.size() > 10) {
     vector<Tensor*> args;
     for (auto nid : nids) {
       const Node* node = cg.nodes[nid];
@@ -177,11 +229,14 @@ const void eval_ewise_unaries_in_bulk(
     fxs->d = orig;
     // deallocte the temp memory
     mempool->used = allocator_state;
-  } else { // just apply each of them individually
+}
+
+const void eval_ewise_unaries_regular(
+    vector<int> &nids, const ComputationGraph &cg, vector<Tensor> *nfxs) {
+
     for (auto nid : nids) {
       do_node(0, (VariableIndex)nid, cg.nodes[nid], nfxs, 0);
     }
-  }
 }
 
 void ExperimentalExecutionEngine::compute_depths(VariableIndex upto) {
@@ -310,17 +365,22 @@ const Tensor& ExperimentalExecutionEngine::incremental_forward(VariableIndex upt
     for (auto it = by_type.begin(); it != by_type.end(); ++it) {
       if (ewise_unary_nodes.find(it->first) != ewise_unary_nodes.end()) {
         eval_ewise_unaries_in_bulk(it->second, cg, &nfxs);
+        //eval_bulk_regular(it->second, cg, &nfxs);
+      } else if (false && ewise_binary_nodes.find(it->first) != ewise_binary_nodes.end()) { // not efficient
+        cout << "start binary" << endl;
+        eval_ewise_binaries_in_bulk(it->second, cg, &nfxs);
+        eval_bulk_regular(it->second, cg, &nfxs);
+        cout << "end binary" << endl;
       } else if (it->first == NodeType::MatrixMultiply2x1) {
         continue; 
       } else {
-        for (auto nid : it->second) {
-          do_node(1, (VariableIndex)nid, cg.nodes[nid], &nfxs, 0);
-        }
+        eval_bulk_regular(it->second, cg, &nfxs);
       }
     }
     // apply the matrix multiplications.
     for (auto it = matmuls_by_first_arg.begin(); it != matmuls_by_first_arg.end(); ++it) {
       eval_2x1_matrix_multiply(it->second, cg, &nfxs);
+      //eval_bulk_regular(it->second, cg, &nfxs);
     }
 
   }

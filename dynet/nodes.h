@@ -69,6 +69,7 @@ struct SelectCols : public Node {
 // x_2 raise every element in x_1 to the power of scalar x_2
 struct Pow : public Node {
   explicit Pow(const std::initializer_list<VariableIndex>& a) : Node(a) {}
+  virtual NodeType type_id() const override { return NodeType::Pow; }
   DYNET_NODE_DEFINE_DEV_IMPL()
 };
 
@@ -77,6 +78,7 @@ struct Min : public Node {
   explicit Min(const std::initializer_list<VariableIndex>& a) : Node(a) {}
   DYNET_NODE_DEFINE_DEV_IMPL()
   virtual bool supports_multibatch() const override { return true; }
+  virtual NodeType type_id() const override { return NodeType::Min; }
   size_t aux_storage_size() const override;
 };
 
@@ -85,6 +87,7 @@ struct Max : public Node {
   template <typename T> explicit Max(const T& a) : Node(a) {}
   DYNET_NODE_DEFINE_DEV_IMPL()
   virtual bool supports_multibatch() const override { return true; }
+  virtual NodeType type_id() const override { return NodeType::Max; }
   size_t aux_storage_size() const override;
 };
 
@@ -106,6 +109,7 @@ struct ConstScalarMultiply : public Node {
 struct DotProduct : public Node {
   explicit DotProduct(const std::initializer_list<VariableIndex>& a) : Node(a) {}
   virtual bool supports_multibatch() const override { return true; }
+  virtual NodeType type_id() const override { return NodeType::DotProduct; }
   DYNET_NODE_DEFINE_DEV_IMPL()
 };
 

@@ -488,9 +488,24 @@ inline Expression operator/(const Expression& x, float y) { return x * (1.f / y)
  * 
  * \return An expression equal to: xs[0] + xs[1]*xs[2] + xs[3]*xs[4] + ...
  */
-inline Expression affine_transform(const std::initializer_list<Expression>& xs) { return detail::f<AffineTransform>(xs); }
+//inline Expression affine_transform(const std::initializer_list<Expression>& xs) { return detail::f<AffineTransform>(xs); }
+//template <typename T>
+//inline Expression affine_transform(const T& xs) { return detail::f<AffineTransform>(xs); }
+inline Expression affine_transform(const std::initializer_list<Expression>& xs) { 
+  auto it = xs.begin();
+  Expression r = *it;
+  it++;
+  while (it != xs.end()) {
+    Expression a = *it;
+    it++;
+    Expression b = *it;
+    it++;
+    r = r + a*b;
+  }
+  return r;
+}
 template <typename T>
-inline Expression affine_transform(const T& xs) { return detail::f<AffineTransform>(xs); }
+inline Expression affine_transform(const T& xs) { Expression r = xs[0]; for (int i=1; i < xs.size(); i+=2) { r = r + (xs[i]*xs[i+1]); } return r; }
 
 /**
  * \ingroup arithmeticoperations
