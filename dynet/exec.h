@@ -66,6 +66,7 @@ class ExperimentalExecutionEngine : public SimpleExecutionEngine {
 
   std::vector<int> matmuls_per_depth;
   std::vector<int> nodes_per_depth;
+  std::vector<int> args_to_matmuls;
 
   void compute_depths(VariableIndex upto);
 

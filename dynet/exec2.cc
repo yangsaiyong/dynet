@@ -246,6 +246,7 @@ void ExperimentalExecutionEngine::compute_depths(VariableIndex upto) {
 
   matmuls_per_depth.resize(upto+1,0);
   nodes_per_depth.resize(upto+1,0);
+  args_to_matmuls.resize(upto+1,0);
 
   std::fill(depths.begin()+already_evaluated, depths.begin()+upto+1, 0);
   for (int j=already_evaluated; j<upto+1; ++j) {
@@ -258,7 +259,10 @@ void ExperimentalExecutionEngine::compute_depths(VariableIndex upto) {
       }
     }
     const int d = depths[j];
-    if (node->type_id() == NodeType::MatrixMultiply2x1) { matmuls_per_depth[d] += 1; }
+    if (node->type_id() == NodeType::MatrixMultiply2x1) {
+      matmuls_per_depth[d] += 1; 
+      args_to_matmuls[node->args[0]] += 1;
+    }
     nodes_per_depth[d] += 1;
   }
 
@@ -289,10 +293,11 @@ void ExperimentalExecutionEngine::compute_depths(VariableIndex upto) {
     const bool heuristic = true;
     const int npd = nodes_per_depth[depths[j]];
     if (heuristic && cg.nodes[j]->type_id() == NodeType::MatrixMultiply2x1 &&
-        npd > 20 && matmuls_per_depth[depths[j]]*1.2 > npd ) { 
-        depths2[j] = depths[j];
+        npd > 20 && matmuls_per_depth[depths[j]]*1.2 > args_to_matmuls[cg.nodes[j]->args[0]]) { 
+        // if most of this node's shared matmuls (the rhs of above eq) are here..
+        depths2[j] = depths[j]; // keep as is.
     } else {
-      depths2[j] = min_of_parents - 1;
+      depths2[j] = min_of_parents - 1; // move up as possible.
     }
   }
 
@@ -338,6 +343,7 @@ const Tensor& ExperimentalExecutionEngine::incremental_forward(VariableIndex upt
 
     std::fill(matmuls_per_depth.begin(), matmuls_per_depth.end(), 0);
     std::fill(nodes_per_depth.begin(), nodes_per_depth.end(), 0);
+    std::fill(args_to_matmuls.begin(), args_to_matmuls.end(), 0);
   }
 
   compute_depths(upto);
@@ -422,6 +428,88 @@ const Tensor& ExperimentalExecutionEngine::incremental_forward(VariableIndex upt
   return nfxs[upto];
 }
 
+// TODO what is happening with parameter nodes if from_where > param_node_id ?
+void ExperimentalExecutionEngine::backward(VariableIndex from_where) {
+  assert(from_where+1 <= nfxs.size());
+  assert(from_where+1 <= cg.nodes.size());
+  if (nfxs[from_where].d.size() != 1) {
+    cerr << "backward() called on non-scalar node.\n";
+    abort();
+  }
+
+  const unsigned num_nodes = from_where+1;
+  ndEdfs.resize(num_nodes);
+  for(Device* device : devices)
+    device->pools[(int)DeviceMempool::DEDFS]->free();
+  // TODO allocate so that (at least) mat-muls or contig in mem.
+  //      use the rev-depth order from fw, and for first node in matmul group
+  //      allocate the entire group, then skip.
+  for (unsigned i = 0; i < num_nodes; ++i) {
+    const auto dim = nfxs[i].d;
+    ndEdfs[i].d = dim;
+    ndEdfs[i].device = nfxs[i].device;
+    ndEdfs[i].v = static_cast<float*>(ndEdfs[i].device->pools[(int)DeviceMempool::DEDFS]->allocate(dim.size() * sizeof(float)));
+    if (!ndEdfs[i].v) {
+      cerr << "out of memory while attempting to allocate space for derivatives\n";
+      abort();
+    }
+  }
+  for(Device* device : devices)
+    device->pools[(int)DeviceMempool::DEDFS]->zero_allocated_memory();
+  // initialize dE/dE = 1
+  ndEdfs.back().v = kSCALAR_ONE;
+
+  // here we find constant paths to avoid doing extra work
+  // by default, a node is constant unless
+  //   1) it is a parameter node
+  //   2) it depends on a non-constant node
+  // (thus, functions of constants and inputs end up being
+  //  false in this computation)
+  vector<bool> needs_derivative(num_nodes, false);
+  for (auto i : cg.parameter_nodes)
+    needs_derivative[i] = true;
+
+  for (unsigned ni = 0; ni < num_nodes; ++ni) {
+    bool nd = needs_derivative[ni];
+    for (auto arg : cg.nodes[ni]->args)
+      nd |= needs_derivative[arg];
+    needs_derivative[ni] = nd;
+  }
+
+  // loop in reverse topological order
+  // consider only nodes that participate in the computation.
+  // TODO move to looping by reverse depth (as computed by forward)
+  //      or somehow skip all but the first nodes in a mat-mul group.
+  //      need to add class-level info in fw to support this.
+  vector<bool> in_computation(num_nodes, false);
+  in_computation[num_nodes - 1] = true;
+  vector<const Tensor*> xs;
+  for (int i = num_nodes - 1; i >= 0; --i) {
+    if (!in_computation[i]) continue;
+    const Node* node = cg.nodes[i];
+    xs.resize(node->arity());
+    unsigned ai = 0;
+    for (VariableIndex arg : node->args) {
+      in_computation[arg] = true;
+      xs[ai] = &nfxs[arg];
+      ++ai;
+    }
+    ai = 0;
+    for (VariableIndex arg : node->args) {
+      if (needs_derivative[arg]) {
+        node->backward(xs, nfxs[i], ndEdfs[i], ai, ndEdfs[arg]);
+      }
+      ++ai;
+    }
+  }
+
+  // accumulate gradients into parameters
+  // this is simpler than you might find in some other frameworks
+  // since we assume parameters come into the graph as a "function"
+  // that returns the current value of the parameters
+  for (VariableIndex i : cg.parameter_nodes)
+    static_cast<ParameterNodeBase*>(cg.nodes[i])->accumulate_grad(ndEdfs[i]);
+}
 
 // below: copied from SimpleExecutionEngine without change.
 
@@ -461,80 +549,4 @@ void ExperimentalExecutionEngine::backward() {
   backward((VariableIndex)(cg.nodes.size()-1));
 }
 
-// TODO what is happening with parameter nodes if from_where > param_node_id ?
-void ExperimentalExecutionEngine::backward(VariableIndex from_where) {
-  assert(from_where+1 <= nfxs.size());
-  assert(from_where+1 <= cg.nodes.size());
-  if (nfxs[from_where].d.size() != 1) {
-    cerr << "backward() called on non-scalar node.\n";
-    abort();
-  }
-
-  const unsigned num_nodes = from_where+1;
-  ndEdfs.resize(num_nodes);
-  for(Device* device : devices)
-    device->pools[(int)DeviceMempool::DEDFS]->free();
-  for (unsigned i = 0; i < num_nodes; ++i) {
-    const auto dim = nfxs[i].d;
-    ndEdfs[i].d = dim;
-    ndEdfs[i].device = nfxs[i].device;
-    ndEdfs[i].v = static_cast<float*>(ndEdfs[i].device->pools[(int)DeviceMempool::DEDFS]->allocate(dim.size() * sizeof(float)));
-    if (!ndEdfs[i].v) {
-      cerr << "out of memory while attempting to allocate space for derivatives\n";
-      abort();
-    }
-  }
-  for(Device* device : devices)
-    device->pools[(int)DeviceMempool::DEDFS]->zero_allocated_memory();
-  // initialize dE/dE = 1
-  ndEdfs.back().v = kSCALAR_ONE;
-
-  // here we find constant paths to avoid doing extra work
-  // by default, a node is constant unless
-  //   1) it is a parameter node
-  //   2) it depends on a non-constant node
-  // (thus, functions of constants and inputs end up being
-  //  false in this computation)
-  vector<bool> needs_derivative(num_nodes, false);
-  for (auto i : cg.parameter_nodes)
-    needs_derivative[i] = true;
-
-  for (unsigned ni = 0; ni < num_nodes; ++ni) {
-    bool nd = needs_derivative[ni];
-    for (auto arg : cg.nodes[ni]->args)
-      nd |= needs_derivative[arg];
-    needs_derivative[ni] = nd;
-  }
-
-  // loop in reverse topological order
-  // consider only nodes that participate in the computation.
-  vector<bool> in_computation(num_nodes, false);
-  in_computation[num_nodes - 1] = true;
-  vector<const Tensor*> xs;
-  for (int i = num_nodes - 1; i >= 0; --i) {
-    if (!in_computation[i]) continue;
-    const Node* node = cg.nodes[i];
-    xs.resize(node->arity());
-    unsigned ai = 0;
-    for (VariableIndex arg : node->args) {
-      in_computation[arg] = true;
-      xs[ai] = &nfxs[arg];
-      ++ai;
-    }
-    ai = 0;
-    for (VariableIndex arg : node->args) {
-      if (needs_derivative[arg]) {
-        node->backward(xs, nfxs[i], ndEdfs[i], ai, ndEdfs[arg]);
-      }
-      ++ai;
-    }
-  }
-
-  // accumulate gradients into parameters
-  // this is simpler than you might find in some other frameworks
-  // since we assume parameters come into the graph as a "function"
-  // that returns the current value of the parameters
-  for (VariableIndex i : cg.parameter_nodes)
-    static_cast<ParameterNodeBase*>(cg.nodes[i])->accumulate_grad(ndEdfs[i]);
-}
 } // namespace dynet
