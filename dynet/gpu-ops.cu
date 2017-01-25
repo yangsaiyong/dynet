@@ -109,6 +109,26 @@ void sparse_to_dense_block_assign_and_multiply(int n, const unsigned *idx, int b
   }
 }
 
+// CUDA kernel. Each thread takes care of one row copy.
+__global__ void ker_parallel_memcpy(int n, float **src, float **trg, float **len) {
+  // Get our global thread ID
+  int id = blockIdx.x*blockDim.x+threadIdx.x;
+
+  if (id < n)
+    memcpy(trg[id], src[id], sizeof(float)*(int)len[id]);
+
+  __syncthreads();
+}
+
+void parallel_memcpy(int n, float **src, float **trg, float **len) {
+  if(n > 0) {
+    auto tb = SizeToBlockThreadPair(n);
+    ker_parallel_memcpy<<<tb.first, tb.second>>>(n, src, trg, len);
+  }
+}
+
+
+
 // CUDA kernel. Each thread takes care of one element of c
 __global__ void ker_dense_to_sparse_block_add(int n, const unsigned *idx, int bsize, float* src, float *trg) {
   // Get our global thread ID

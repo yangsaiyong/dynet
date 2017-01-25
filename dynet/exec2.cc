@@ -6,6 +6,10 @@
 #include "dynet/countdownlatch.h"
 #include "dynet/nodes.h"
 #include "dynet/timing.h"
+
+#ifdef HAVE_CUDA
+#include "dynet/gpu-ops.h"
+#endif
 using namespace std;
 
 namespace dynet {
@@ -80,26 +84,53 @@ const void _allocate_nids(const vector<int> &nids, const ComputationGraph &cg,
 // copies the list of tensors into a single contig tensor (tout).
 // allocates the memory for tout.
 const void combine_tensors(const vector<Tensor*> &ts, Tensor *tout) {
+
+  AlignedMemoryPool *mempool = ts[0]->device->pools[(int)DeviceMempool::FXS];
   // determine needed memory
   unsigned total_dsize = 0;
+  float *base = ts[0]->v;
+  bool cont = true;
   for (auto t : ts) {
+    cont &= (base + total_dsize == t->v); // TODOO this is only helpful on GPU
     total_dsize += t->d.size();
   }
-  // allocate
-  float* dest = static_cast<float*>(ts[0]->device->pools[(int)DeviceMempool::FXS]->allocate(total_dsize * sizeof(float)));
   tout->d = Dim({total_dsize});
+  if (cont) {
+    tout->v = base;
+    return;
+  }
+  // allocate
+  float* dest = static_cast<float*>(mempool->allocate(total_dsize * sizeof(float)));
+
+#if HAVE_CUDA
+  vector<float*> locs(ts.size()*3);
+  unsigned i = 0;
+#endif
   tout->v = dest;
   // copy
+  const int TRG = ts.size();
+  const int LEN = ts.size()*2;
   for (auto t : ts) {
     const size_t sz = t->d.size();
 
 #if HAVE_CUDA
-    cudaMemcpyAsync(dest, t->v, sz*sizeof(float), cudaMemcpyDeviceToDevice);
+    locs[i] = t->v; // src
+    locs[i+TRG] = dest;
+    locs[i+LEN] = (float*)sz;
+    i++;
 #else
     memcpy(dest, t->v, sz*sizeof(float));
 #endif
     dest += sz; // pointer arith
   }
+#if HAVE_CUDA
+  size_t req_sz = ts.size()*3*sizeof(float*);
+  float** srcs = static_cast<float**>(mempool->allocate(req_sz));
+  float** trgs = srcs + TRG;
+  float** lens = srcs + LEN;
+  CUDA_CHECK(cudaMemcpyAsync(srcs, &(locs)[0], locs.size()*sizeof(float**), cudaMemcpyHostToDevice));
+  gpu::parallel_memcpy(ts.size(), srcs, trgs, lens);
+#endif
 }
 
 // get a list of mat-mul items, not necessarily all of same shapes.
