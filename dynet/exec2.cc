@@ -29,7 +29,7 @@ struct BulkOpInfo {
 };
 
 const set<NodeType> ewise_unary_nodes { NodeType::Tanh, NodeType::Rectify, NodeType::Sigmoid, NodeType::Erf, NodeType::Sqrt, NodeType::Exp, NodeType::LogGamma, NodeType::Log, NodeType::Negate };
-const set<NodeType> ewise_binary_nodes { NodeType::CwiseMultiply }; //, NodeType::CwiseQuotient, NodeType::Pow, NodeType::Min, NodeType::Max };
+const set<NodeType> ewise_binary_nodes { NodeType::CwiseMultiply, NodeType::BinarySum }; //, NodeType::CwiseQuotient, NodeType::Pow, NodeType::Min, NodeType::Max };
 
 // this can run in a different thread, given that the memory is initialized.
 void do_node(int id, VariableIndex node_id, const Node *node, std::vector<Tensor> *nfxs, clatch::countdownlatch *cl) {
@@ -106,6 +106,7 @@ const void combine_tensors(const vector<Tensor*> &ts, Tensor *tout) {
 #if HAVE_CUDA
   vector<float*> locs(ts.size()*3);
   unsigned i = 0;
+  unsigned max_length = 0;
 #endif
   tout->v = dest;
   // copy
@@ -118,6 +119,7 @@ const void combine_tensors(const vector<Tensor*> &ts, Tensor *tout) {
     locs[i] = t->v; // src
     locs[i+TRG] = dest;
     locs[i+LEN] = (float*)sz;
+    if (max_length < sz) max_length=sz;
     i++;
 #else
     memcpy(dest, t->v, sz*sizeof(float));
@@ -130,7 +132,7 @@ const void combine_tensors(const vector<Tensor*> &ts, Tensor *tout) {
   float** trgs = srcs + TRG;
   float** lens = srcs + LEN;
   CUDA_CHECK(cudaMemcpyAsync(srcs, &(locs)[0], locs.size()*sizeof(float**), cudaMemcpyHostToDevice));
-  gpu::parallel_memcpy(ts.size(), srcs, trgs, lens);
+  gpu::parallel_memcpy(ts.size(), max_length, srcs, trgs, lens);
 #endif
 }
 
@@ -431,16 +433,16 @@ const Tensor& ExperimentalExecutionEngine::incremental_forward(VariableIndex upt
       if (ewise_unary_nodes.find(it->first) != ewise_unary_nodes.end()) {
         eval_ewise_unaries_in_bulk(it->second, cg, &nfxs);
         //eval_bulk_regular(it->second, cg, &nfxs);
-      } else if (false && ewise_binary_nodes.find(it->first) != ewise_binary_nodes.end()) { // not efficient
-        cout << "start binary" << endl;
-        { Timer t("batch");
+      } else if (true && ewise_binary_nodes.find(it->first) != ewise_binary_nodes.end()) { // not efficient
+        //cout << "start binary" << endl;
+        //{ Timer t("batch");
         eval_ewise_binaries_in_bulk(it->second, cg, &nfxs);
-        }
-        {
-          Timer t("regulr");
-        eval_bulk_regular(it->second, cg, &nfxs);
-        }
-        cout << "end binary" << endl;
+        //}
+        //{
+        //  Timer t("regulr");
+        //eval_bulk_regular(it->second, cg, &nfxs);
+        //}
+        //cout << "end binary" << endl;
       } else if (it->first == NodeType::MatrixMultiply2x1) {
         continue; 
       } else {

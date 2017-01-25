@@ -11,7 +11,7 @@ namespace dynet {
         MatrixMultiply2x1,
 
         // Binaries
-        CwiseMultiply, CwiseQuotient, 
+        CwiseMultiply, CwiseQuotient, BinarySum,
         Pow, Min, Max, DotProduct,
 
         // Others to consider later

@@ -110,20 +110,29 @@ void sparse_to_dense_block_assign_and_multiply(int n, const unsigned *idx, int b
 }
 
 // CUDA kernel. Each thread takes care of one row copy.
-__global__ void ker_parallel_memcpy(int n, float **src, float **trg, float **len) {
+__global__ void ker_parallel_memcpy(int num_seqs, float **src, float **trg, float **len) {
   // Get our global thread ID
   int id = blockIdx.x*blockDim.x+threadIdx.x;
 
-  if (id < n)
-    memcpy(trg[id], src[id], sizeof(float)*(int)len[id]);
+  //if (id < n)
+  //  memcpy(trg[id], src[id], sizeof(float)*(int)len[id]);
+  int seq_id = id % num_seqs;
+  int i = id / num_seqs;
+  if (i < (unsigned long)len[seq_id])
+     trg[seq_id][i] = src[seq_id][i];
 
   __syncthreads();
 }
 
-void parallel_memcpy(int n, float **src, float **trg, float **len) {
-  if(n > 0) {
-    auto tb = SizeToBlockThreadPair(n);
-    ker_parallel_memcpy<<<tb.first, tb.second>>>(n, src, trg, len);
+void parallel_memcpy(int num_seqs, int max_len, float **src, float **trg, float **len) {
+  if(num_seqs > 0) {
+    //unsigned long max_len = 0;
+    //for (int i=0; i < num_seqs; ++i) {
+    //   if (max_len < (unsigned long)(len[i])) max_len = (unsigned long)(len[i]);
+    //}
+    //std::cout << "max_len:" << max_len << std::endl;
+    auto tb = SizeToBlockThreadPair(num_seqs*max_len);
+    ker_parallel_memcpy<<<tb.first, tb.second>>>(num_seqs, src, trg, len);
   }
 }
 

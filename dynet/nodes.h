@@ -414,8 +414,12 @@ struct LogDet : public Node {
 // y = \sum_i x_i
 struct Sum : public Node {
   template <typename T> explicit Sum(const T& a) : Node(a) {}
-  DYNET_NODE_DEFINE_DEV_IMPL()
   virtual bool supports_multibatch() const override { return true; }
+  virtual NodeType type_id() const override { 
+     if (args.size() == 2) return NodeType::BinarySum;
+     return NodeType::UNK;
+  }
+  DYNET_NODE_DEFINE_DEV_IMPL()
 };
 
 // y = \sum_i x_i
