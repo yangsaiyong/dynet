@@ -133,6 +133,7 @@ struct ComputationGraph {
   std::vector<VariableIndex> parameter_nodes; // nodes that contain parameters that can be updated (subset of nodes)
 
   ExecutionEngine* ee;  // handles the execution
+
  private:
   void set_dim_for_new_node(const VariableIndex& i);
 

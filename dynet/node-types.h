@@ -10,10 +10,14 @@ namespace dynet {
         // matrix multiplication
         MatrixMultiply2x1,
 
+        // Binaries
+        CwiseMultiply, CwiseQuotient, 
+        Pow, Min, Max, DotProduct,
+
         // Others to consider later
         MatrixMultiply1x2, MatrixMultiply2x2, MatrixMultiply1x1,
         AffineTransform,
-        CwiseMultiply, CwiseQuotient, Concatenate, 
+        Concatenate, 
     };
 }
 #endif
