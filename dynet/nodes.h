@@ -413,12 +413,13 @@ struct LogDet : public Node {
 
 // y = \sum_i x_i
 struct Sum : public Node {
-  template <typename T> explicit Sum(const T& a) : Node(a) {}
+  template <typename T> explicit Sum(const T& a) : Node(a), _type(NodeType::UNK) {}
   virtual bool supports_multibatch() const override { return true; }
-  virtual NodeType type_id() const override { 
-     if (args.size() == 2) return NodeType::BinarySum;
-     return NodeType::UNK;
-  }
+  // set_slowness sets _type for BinarySum nodes.
+  // implemented in nodes-common.cc 
+  virtual void set_slowness(const std::vector<Dim> &xs) override;
+  virtual NodeType type_id() const override { return _type; }
+  NodeType _type; // either UNK or BinarySum
   DYNET_NODE_DEFINE_DEV_IMPL()
 };
 

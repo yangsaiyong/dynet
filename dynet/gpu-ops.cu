@@ -114,8 +114,6 @@ __global__ void ker_parallel_memcpy(int num_seqs, float **src, float **trg, floa
   // Get our global thread ID
   int id = blockIdx.x*blockDim.x+threadIdx.x;
 
-  //if (id < n)
-  //  memcpy(trg[id], src[id], sizeof(float)*(int)len[id]);
   int seq_id = id % num_seqs;
   int i = id / num_seqs;
   if (i < (unsigned long)len[seq_id])
@@ -126,11 +124,6 @@ __global__ void ker_parallel_memcpy(int num_seqs, float **src, float **trg, floa
 
 void parallel_memcpy(int num_seqs, int max_len, float **src, float **trg, float **len) {
   if(num_seqs > 0) {
-    //unsigned long max_len = 0;
-    //for (int i=0; i < num_seqs; ++i) {
-    //   if (max_len < (unsigned long)(len[i])) max_len = (unsigned long)(len[i]);
-    //}
-    //std::cout << "max_len:" << max_len << std::endl;
     auto tb = SizeToBlockThreadPair(num_seqs*max_len);
     ker_parallel_memcpy<<<tb.first, tb.second>>>(num_seqs, src, trg, len);
   }

@@ -29,7 +29,7 @@ struct BulkOpInfo {
 };
 
 const set<NodeType> ewise_unary_nodes { NodeType::Tanh, NodeType::Rectify, NodeType::Sigmoid, NodeType::Erf, NodeType::Sqrt, NodeType::Exp, NodeType::LogGamma, NodeType::Log, NodeType::Negate };
-const set<NodeType> ewise_binary_nodes { NodeType::CwiseMultiply, NodeType::BinarySum }; //, NodeType::CwiseQuotient, NodeType::Pow, NodeType::Min, NodeType::Max };
+const set<NodeType> ewise_binary_nodes { /*NodeType::CwiseMultiply,*/ NodeType::BinarySum }; //, NodeType::CwiseQuotient, NodeType::Pow, NodeType::Min, NodeType::Max };
 
 // this can run in a different thread, given that the memory is initialized.
 void do_node(int id, VariableIndex node_id, const Node *node, std::vector<Tensor> *nfxs, clatch::countdownlatch *cl) {
@@ -107,11 +107,11 @@ const void combine_tensors(const vector<Tensor*> &ts, Tensor *tout) {
   vector<float*> locs(ts.size()*3);
   unsigned i = 0;
   unsigned max_length = 0;
+  const int TRG = ts.size();
+  const int LEN = ts.size()*2;
 #endif
   tout->v = dest;
   // copy
-  const int TRG = ts.size();
-  const int LEN = ts.size()*2;
   for (auto t : ts) {
     const size_t sz = t->d.size();
 
@@ -198,8 +198,15 @@ const void eval_bulk_regular(
     }
 }
 
+void print_tensor(Tensor* t, string s) {
+   cout << s << "   ";
+   for (int i=0; i<t->d.size(); ++i) { cout << "  " << t->v[i]; }
+   cout << endl;
+}
+
 const void eval_ewise_binaries_in_bulk(
     vector<int> &nids, const ComputationGraph &cg, vector<Tensor> *nfxs) {
+   //cout << "ewise binary" << endl;
 
     vector<Tensor*> a1s;
     vector<Tensor*> a2s;
@@ -223,13 +230,18 @@ const void eval_ewise_binaries_in_bulk(
     combine_tensors(a2s, &A2);
     //cout << "A1 dim:" << A1.d << endl;
     //cout << "A2 dim:" << A2.d << endl;
+    //print_tensor(&A1, "A1");
+    //print_tensor(&A2, "A2");
     const vector<const Tensor*> xs { &A1, &A2 };
     // apply the (first) node on the bulk tensor.
     Tensor *fxs = &(*nfxs)[nids[0]];
     Dim orig = fxs->d;
+    //cout << "orig " << orig << endl;
     fxs->d = Dim({total_result_size});
     first_node->forward(xs, *fxs);
+    //print_tensor(fxs, "RES1");
     fxs->d = orig;
+    //print_tensor(fxs, "RES2");
     // deallocte the temp memory
     mempool->used = allocator_state;
 }
@@ -369,6 +381,12 @@ const Tensor& ExperimentalExecutionEngine::incremental_forward(VariableIndex upt
 
   const int already_evaluated = num_nodes_evaluated;
 
+#ifdef HAVE_CUDA
+  const bool batch_cwise_binary_ops = true;
+#else
+  const bool batch_cwise_binary_ops = false;  // not a win on CPU
+#endif
+
   // free any old memory if this is a new CG
   if (already_evaluated == 0) {
     for(Device* dev : dynet::devices)
@@ -377,6 +395,13 @@ const Tensor& ExperimentalExecutionEngine::incremental_forward(VariableIndex upt
     std::fill(matmuls_per_depth.begin(), matmuls_per_depth.end(), 0);
     std::fill(nodes_per_depth.begin(), nodes_per_depth.end(), 0);
     std::fill(args_to_matmuls.begin(), args_to_matmuls.end(), 0);
+    // To be on the safe side, kill all additional information also:
+    // TODO move these to the "invalidate" method?
+    depths.clear();
+    depths2.clear();
+    by_depth.clear();
+    parents.clear();
+
   }
 
   compute_depths(upto);
@@ -433,7 +458,7 @@ const Tensor& ExperimentalExecutionEngine::incremental_forward(VariableIndex upt
       if (ewise_unary_nodes.find(it->first) != ewise_unary_nodes.end()) {
         eval_ewise_unaries_in_bulk(it->second, cg, &nfxs);
         //eval_bulk_regular(it->second, cg, &nfxs);
-      } else if (true && ewise_binary_nodes.find(it->first) != ewise_binary_nodes.end()) { // not efficient
+      } else if (batch_cwise_binary_ops && ewise_binary_nodes.find(it->first) != ewise_binary_nodes.end()) { // not efficient
         //cout << "start binary" << endl;
         //{ Timer t("batch");
         eval_ewise_binaries_in_bulk(it->second, cg, &nfxs);

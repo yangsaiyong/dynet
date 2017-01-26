@@ -325,6 +325,12 @@ Dim Sum::dim_forward(const vector<Dim>& xs) const {
   return d;
 }
 
+void Sum::set_slowness(const std::vector<Dim> &xs) { 
+   // for autobatching we focus on the binary and unbatched case. (we don't want to handle broadcasting yet).
+   if (xs.size() == 2 && xs[0].bd == 1 && xs[1].bd == 1) _type = NodeType::BinarySum;
+   else _type = NodeType::UNK;
+}
+
 string SumBatches::as_string(const vector<string>& arg_names) const {
   ostringstream s;
   s << "sum_batches( " << arg_names[0] << " )";
