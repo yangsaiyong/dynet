@@ -2044,6 +2044,14 @@ cdef class SimpleSGDTrainer:
             self.thisptr.clip_threshold = thr
     cpdef get_clip_threshold(self):
         return self.thisptr.clip_threshold
+    cpdef update_epoch_lr(self, bool update_lr=False):
+        self.thisptr.epoch += 1
+        if update_lr:
+            self.thisptr.eta = self.thisptr.eta * self.thisptr.eta_decay
+    cpdef set_learning_rate(self, float lr):
+        self.thisptr.eta = lr
+    cpdef get_learning_rate(self):
+        return self.thisptr.eta
 
 cdef class MomentumSGDTrainer:
     cdef CMomentumSGDTrainer *thisptr
@@ -2074,6 +2082,14 @@ cdef class MomentumSGDTrainer:
             self.thisptr.clip_threshold = thr
     cpdef get_clip_threshold(self):
         return self.thisptr.clip_threshold
+    cpdef update_epoch_lr(self, bool update_lr=False):
+        self.thisptr.epoch += 1
+        if update_lr:
+            self.thisptr.eta = self.thisptr.eta * self.thisptr.eta_decay
+    cpdef set_learning_rate(self, float lr):
+        self.thisptr.eta = lr
+    cpdef get_learning_rate(self):
+        return self.thisptr.eta
 
 
 cdef class AdagradTrainer:
@@ -2105,6 +2121,14 @@ cdef class AdagradTrainer:
             self.thisptr.clip_threshold = thr
     cpdef get_clip_threshold(self):
         return self.thisptr.clip_threshold
+    cpdef update_epoch_lr(self, bool update_lr=False):
+        self.thisptr.epoch += 1
+        if update_lr:
+            self.thisptr.eta = self.thisptr.eta * self.thisptr.eta_decay
+    cpdef set_learning_rate(self, float lr):
+        self.thisptr.eta = lr
+    cpdef get_learning_rate(self):
+        return self.thisptr.eta
 
 
 cdef class AdadeltaTrainer:
@@ -2136,6 +2160,14 @@ cdef class AdadeltaTrainer:
             self.thisptr.clip_threshold = thr
     cpdef get_clip_threshold(self):
         return self.thisptr.clip_threshold
+    cpdef update_epoch_lr(self, bool update_lr=False):
+        self.thisptr.epoch += 1
+        if update_lr:
+            self.thisptr.eta = self.thisptr.eta * self.thisptr.eta_decay
+    cpdef set_learning_rate(self, float lr):
+        self.thisptr.eta = lr
+    cpdef get_learning_rate(self):
+        return self.thisptr.eta
 
 
 cdef class AdamTrainer:
@@ -2167,5 +2199,13 @@ cdef class AdamTrainer:
             self.thisptr.clip_threshold = thr
     cpdef get_clip_threshold(self):
         return self.thisptr.clip_threshold
+    cpdef update_epoch_lr(self, bool update_lr=False):
+        self.thisptr.epoch += 1
+        if update_lr:
+            self.thisptr.eta = self.thisptr.eta * self.thisptr.eta_decay
+    cpdef set_learning_rate(self, float lr):
+        self.thisptr.eta = lr
+    cpdef get_learning_rate(self):
+        return self.thisptr.eta
 
 #}}}
